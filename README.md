@@ -1,7 +1,3 @@
-# Project Name
-
-This Project was presented in [Vandy Hacks](https://devpost.com/software/quickotp) and won the Best Use of Workshop Tech
-
 # AI-Based OTP Autofill Chrome Extension
 
 This Chrome extension automates OTP filling and verification link handling using AI and Google Pub/Sub. It detects new otp/verifications related email, extracts OTPs or verification links, and open verification links in new tabs automatically.
