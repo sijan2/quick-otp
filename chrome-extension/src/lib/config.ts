@@ -1,8 +1,10 @@
+
 export const config = {
-  OPENAI_API_KEY: process.env.EXTENSION_PUBLIC_OPENAI_API_KEY || '',
+  // URL for establishing WebSocket connection (e.g., wss://your-worker.your-domain.workers.dev)
   WEBSOCKET_URL: process.env.EXTENSION_PUBLIC_WEBSOCKET_URL || '',
-  GMAIL_CLIENT_ID: process.env.EXTENSION_PUBLIC_GMAIL_CLIENT_ID || '',
-  REDIRECT_URI: process.env.EXTENSION_PUBLIC_REDIRECT_URI || '',
-  TOKEN_EXCHANGE_URL: process.env.EXTENSION_PUBLIC_TOKEN_EXCHANGE_URL || '',
-  REFRESH_URL: process.env.EXTENSION_PUBLIC_REFRESH_URL || '',
+
+  // Base URL for backend HTTP endpoints (e.g., https://your-worker.your-domain.workers.dev)
+  BACKEND_URL: process.env.EXTENSION_PUBLIC_BACKEND_URL || '',
+
+ 
 };

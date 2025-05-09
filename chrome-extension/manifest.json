@@ -1,17 +1,19 @@
 {
   "manifest_version": 3,
   "version": "1.0",
-  "name": "otp",
-  "description": "An AI extension that helps you to autofill OTPs",
+  "name": "Quick OTP",
+  "description": "An AI extension that helps you to autofill OTPs from gmail",
   "background": {
     "service_worker": "src/background.ts"
   },
   "host_permissions": ["<all_urls>"],
-  "permissions": ["identity", "tabs", "storage", "webRequest", "notifications"],
-  "oauth2": {
-    "client_id": "$EXTENSION_PUBLIC_API_KEY",
-    "scopes": ["https://mail.google.com/"]
-  },
+  "permissions": [
+    "identity",
+    "tabs",
+    "storage",
+    "notifications",
+    "windows"
+  ],
   "action": {
     "default_popup": "src/popup/index.html"
   },
@@ -22,7 +24,9 @@
     }
   ],
   "icons": {
-    "16": "images/icon_16.png",
-    "48": "images/icon_48.png"
+    "16": "images/icon16.png",
+    "32": "images/icon32.png",
+    "48": "images/icon48.png",
+    "128": "images/icon128.png"
   }
 }

@@ -2,15 +2,16 @@ import React, { useState, useEffect } from 'react'
 
 interface ContentAppProps {
   otp: string
+  url?: string | null
 }
 
-const ContentApp: React.FC<ContentAppProps> = ({ otp }) => {
+const ContentApp: React.FC<ContentAppProps> = ({ otp, url }) => {
   const [otps, setOtp] = useState(otp)
   const [visible, setVisible] = useState(true)
   const [copySuccess, setCopySuccess] = useState('')
 
   useEffect(() => {
-    console.log('OTP updated in ContentApp:', otp)
+    console.log('ContentApp updated with OTP:', otp, 'URL:', url)
     setOtp(otp)
     setVisible(true)
 
@@ -22,7 +23,7 @@ const ContentApp: React.FC<ContentAppProps> = ({ otp }) => {
       clearTimeout(timer)
       console.log('Timer cleared for OTP:', otp)
     }
-  }, [otp])
+  }, [otp, url])
 
   const handleCopyClick = () => {
     if (navigator.clipboard && window.isSecureContext) {
@@ -61,6 +62,13 @@ const ContentApp: React.FC<ContentAppProps> = ({ otp }) => {
     }
   }
 
+  // Function to handle opening the link
+  const handleOpenLinkClick = () => {
+    if (url) {
+      window.open(url, '_blank')
+    }
+  }
+
   if (!visible) return null
 
   return (
@@ -81,7 +89,7 @@ const ContentApp: React.FC<ContentAppProps> = ({ otp }) => {
       }}
     >
       <p style={{ margin: '0 0 8px', fontWeight: 'bold', fontSize: '16px' }}>
-        OTP Received
+        {url ? 'OTP & Link Received' : 'OTP Received'}
       </p>
       <p
         style={{
@@ -105,10 +113,29 @@ const ContentApp: React.FC<ContentAppProps> = ({ otp }) => {
           borderRadius: '8px',
           cursor: 'pointer',
           fontSize: '16px',
+          marginBottom: url ? '8px' : '0',
         }}
       >
         Copy OTP
       </button>
+      {url && (
+        <button
+          onClick={handleOpenLinkClick}
+          style={{
+            display: 'block',
+            width: '100%',
+            padding: '10px',
+            backgroundColor: '#2196F3',
+            color: 'white',
+            border: 'none',
+            borderRadius: '8px',
+            cursor: 'pointer',
+            fontSize: '16px',
+          }}
+        >
+          Open Link
+        </button>
+      )}
       {copySuccess && (
         <p style={{ color: 'green', marginTop: '8px', textAlign: 'center' }}>
           {copySuccess}

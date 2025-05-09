@@ -1,0 +1,43 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "quiet-lab-240a",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-04-28",
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "WebSocketHub",
+				"name": "WEBSOCKET_HUB"
+			},
+			{
+				"class_name": "TokenStoreDO",
+				"name": "TOKEN_STORE_DO"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v2",
+			"new_sqlite_classes": [
+				"WebSocketHub",
+				"TokenStoreDO"
+			]
+		},
+		{
+			"tag": "v3",
+			"deleted_classes": [
+				"MyDurableObject"
+			]
+		}
+	],
+	"observability": {
+		"enabled": true
+	},
+	"vars": {
+
+	}
+}

@@ -1,110 +1,100 @@
 // ../lib/setup.ts
 
-import axios from 'axios'
+import { config } from './config';
+import { oauthManager } from './oauth';
 
-const GMAIL_API_BASE_URL = 'https://www.googleapis.com/gmail/v1'
-
-// Define an interface for the watch response
-export interface WatchResponse {
-  historyId: string
-  expiration: string
+export interface GmailLabel {
+  id: string;
+  name: string;
+  type: string; // 'system' or 'user'
 }
 
-// Function to set up Gmail watch on the 'otp' label
-export const setupGmailWatch = async (
-  accessToken: string
-): Promise<WatchResponse> => {
-  try {
-    // Fetch all labels to find the 'otp' label
-    const labelsResponse = await axios.get(
-      `${GMAIL_API_BASE_URL}/users/me/labels`,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    )
-
-    const labels = labelsResponse.data.labels
-    if (!labels) {
-      throw new Error('No labels found.')
-    }
-
-    // Find the label named 'otp'
-    const otpLabel = labels.find((label: any) => label.name === 'otp')
-
-    let labelId: string
-
-    if (otpLabel && otpLabel.id) {
-      labelId = otpLabel.id
-      console.log(`Found label 'otp' with ID: ${labelId}`)
-    } else {
-      // If the 'otp' label doesn't exist, create it
-      console.log("Label 'otp' not found. Creating it.")
-      labelId = await createLabel(accessToken, 'otp')
-    }
-
-    // Set up the watch on the 'otp' label
-    const watchRequestBody = {
-      topicName: 'projects/sijan-420305/topics/otp',
-      labelIds: [labelId],
-    }
-
-    const watchResponse = await axios.post(
-      `${GMAIL_API_BASE_URL}/users/me/watch`,
-      watchRequestBody,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    )
-
-    console.log('Watch set up successfully:', watchResponse.data)
-
-    // Return the watch response data
-    const responseData: WatchResponse = {
-      historyId: watchResponse.data.historyId,
-      expiration: watchResponse.data.expiration,
-    }
-
-    return responseData
-  } catch (error: any) {
-    const errorMessage = error.response?.data || error.message
-    console.error('Failed to set up Gmail watch:', errorMessage)
-    throw new Error(JSON.stringify(errorMessage))
+// Fetch the list of all available Gmail labels
+export async function listLabels(): Promise<GmailLabel[]> {
+  const tokenResponse = await oauthManager.getTokenResponse(); 
+  if (!tokenResponse?.id_token) {
+    throw new Error('User not authenticated');
   }
+
+  const response = await fetch(`${config.BACKEND_URL}/api/list-labels`, {
+    headers: {
+      'Authorization': `Bearer ${tokenResponse.id_token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ message: 'Failed to list labels, unknown error' }));
+    throw new Error(`Failed to list labels: ${errorData.message || response.statusText}`);
+  }
+
+  const data = await response.json();
+  return (data.labels || []) as GmailLabel[];
 }
 
-// Helper function to create a new label
-const createLabel = async (
-  accessToken: string,
-  labelName: string
-): Promise<string> => {
-  try {
-    const label = {
-      name: labelName,
-      labelListVisibility: 'labelShow',
-      messageListVisibility: 'show',
-    }
-
-    const response = await axios.post(
-      `${GMAIL_API_BASE_URL}/users/me/labels`,
-      label,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    )
-
-    console.log(`Label '${labelName}' created successfully.`)
-    return response.data.id // Return the labelId
-  } catch (error: any) {
-    const errorMessage = error.response?.data || error.message
-    console.error('Error creating label:', errorMessage)
-    throw new Error(JSON.stringify(errorMessage))
+// Fetch the list of currently watched label IDs
+export async function getWatchedLabels(): Promise<string[]> {
+  const tokenResponse = await oauthManager.getTokenResponse(); 
+  if (!tokenResponse?.id_token) {
+    throw new Error('User not authenticated');
   }
+
+  const response = await fetch(`${config.BACKEND_URL}/api/get-watched-labels`, {
+    headers: {
+      'Authorization': `Bearer ${tokenResponse.id_token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ message: 'Failed to get watched labels, unknown error' }));
+    throw new Error(`Failed to get watched labels: ${errorData.message || response.statusText}`);
+  }
+
+  const data = await response.json();
+  return (data.watchedLabelIds || []) as string[];
+}
+
+// Update the watched labels on the backend
+export async function updateWatchedLabels(labelIds: string[]): Promise<void> {
+  const tokenResponse = await oauthManager.getTokenResponse(); 
+  if (!tokenResponse?.id_token) {
+    throw new Error('User not authenticated');
+  }
+
+  const response = await fetch(`${config.BACKEND_URL}/api/update-watched-labels`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${tokenResponse.id_token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ labelIds }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ message: 'Failed to update watched labels, unknown error' }));
+    throw new Error(`Failed to update watched labels: ${errorData.message || response.statusText}`);
+  }
+  // No specific data needed from response body on success usually
+}
+
+// Stop the current Gmail watch on the backend
+export async function stopCurrentWatch(): Promise<void> {
+  const tokenResponse = await oauthManager.getTokenResponse(); 
+  if (!tokenResponse?.id_token) {
+    throw new Error('User not authenticated');
+  }
+
+  const response = await fetch(`${config.BACKEND_URL}/api/stop-watch`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${tokenResponse.id_token}`,
+      'Content-Type': 'application/json', // Content-Type needed even for no body sometimes
+    },
+    // No body needed for this request
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ message: 'Failed to stop watch, unknown error' }));
+    throw new Error(`Failed to stop watch: ${errorData.message || response.statusText}`);
+  }
+  // No specific data needed from response body on success
 }

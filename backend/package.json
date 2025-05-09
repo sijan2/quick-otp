@@ -1,0 +1,25 @@
+{
+	"name": "quiet-lab-240a",
+	"version": "0.0.0",
+	"private": true,
+	"scripts": {
+		"deploy": "wrangler deploy",
+		"dev": "wrangler dev",
+		"start": "wrangler dev",
+		"cf-typegen": "wrangler types"
+	},
+	"dependencies": {
+		"jose": "^5.1.1",
+		"@google-cloud/pubsub": "^4.0.7",
+		"itty-router": "^4.0.27",
+		"crypto-js": "^4.2.0"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^4.20250428.0",
+		"@types/crypto-js": "^4.2.1",
+		"@types/node": "^20.10.5",
+		"typescript": "^5.5.2",
+		"wrangler": "^4.13.2"
+	},
+	"packageManager": "pnpm@10.10.0+sha512.d615db246fe70f25dcfea6d8d73dee782ce23e2245e3c4f6f888249fb568149318637dca73c2c5c8ef2a4ca0d5657fb9567188bfab47f566d1ee6ce987815c39"
+}

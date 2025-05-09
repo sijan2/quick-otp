@@ -1,0 +1,555 @@
+import { Router } from 'itty-router';
+
+import { WebSocketHub } from './durable-objects/WebSocketHubDO';
+import { TokenStoreDO } from './durable-objects/TokenStoreDO';
+
+// Import services from new location
+import {
+  generateAuthUrl,
+  generatePKCE,
+  exchangeCodeForTokens,
+  verifyAndDecodeIdToken,
+  revokeGoogleToken
+} from './services/authService';
+import { setupGmailWatch, handleGmailPushNotification, stopGmailWatch, listGmailLabels, setupGmailOtpAutomation } from './services/gmailService';
+import { parsePubSubMessage } from './services/pubsubService';
+
+// Removed imports from deleted ./utils/token-store
+
+// Create a new router
+const router = Router();
+
+// Session state storage (for OAuth flow)
+const sessionStates = new Map<string, { codeVerifier: string, redirectUrl?: string }>();
+
+
+const MASTER_TOKEN_STORE_ID = "MASTER_TOKEN_STORE";
+function getTokenStoreDOStub(env: Env): TokenStoreDO {
+  const id = env.TOKEN_STORE_DO.idFromName(MASTER_TOKEN_STORE_ID);
+  return env.TOKEN_STORE_DO.get(id) as unknown as TokenStoreDO;
+}
+
+// Helper to get user-specific WebSocketHubDO stub
+function getWebSocketHubStub(env: Env, userId: string): WebSocketHub {
+    const id = env.WEBSOCKET_HUB.idFromName(userId);
+    return env.WEBSOCKET_HUB.get(id) as unknown as WebSocketHub;
+}
+
+// Route: OAuth login
+router.get('/auth/login', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const url = new URL(request.url);
+    const redirectUrl = url.searchParams.get('redirectUrl') || 'chrome-extension://your-extension-id/callback.html'; // Placeholder: Update with your actual extension ID
+    const { verifier, challenge } = await generatePKCE();
+    const state = crypto.randomUUID();
+    sessionStates.set(state, { codeVerifier: verifier, redirectUrl });
+    const authUrl = generateAuthUrl(env.GOOGLE_CLIENT_ID, env.GOOGLE_REDIRECT_URI, state, challenge);
+    return Response.redirect(authUrl, 302);
+  } catch (error: any) {
+    console.error('Error initiating OAuth flow:', error);
+    return new Response('Error initiating OAuth flow', { status: 500 });
+  }
+});
+
+// Route: OAuth callback
+router.get('/auth/callback', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const url = new URL(request.url);
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    if (!code || !state) return new Response('Missing code or state parameter', { status: 400 });
+    const session = sessionStates.get(state);
+    if (!session) return new Response('Invalid state parameter', { status: 400 });
+    sessionStates.delete(state);
+
+    const tokens = await exchangeCodeForTokens(code, session.codeVerifier, env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_REDIRECT_URI);
+    if (!tokens.id_token) throw new Error('ID token missing from Google response');
+
+    const idTokenPayload = await verifyAndDecodeIdToken(tokens.id_token, env.GOOGLE_CLIENT_ID);
+    const tokenStoreStub = getTokenStoreDOStub(env);
+
+    // Store tokens ONLY in TokenStoreDO
+    // Pass default watchedLabelIds, storeTokens will handle preserving if already set
+    await tokenStoreStub.storeTokens(
+        idTokenPayload.sub,
+        idTokenPayload.email,
+        tokens.access_token,
+        tokens.refresh_token || '',
+        Math.floor(Date.now() / 1000) + tokens.expires_in,
+        [] // Explicitly pass empty array, matching new default in storeTokens
+    );
+
+    // REMOVE automatic Gmail watch setup on login/callback
+    /*
+    const currentTokenData = await tokenStoreStub.getTokenByUserId(idTokenPayload.sub);
+    const labelsToWatch = currentTokenData?.watchedLabelIds || []; // Default to empty if not set
+
+    if (labelsToWatch.length > 0) { // Only attempt watch if there are labels to watch
+      try {
+        console.log(`[OAuth Callback] Setting up initial Gmail watch for user ${idTokenPayload.sub} with labels: ${labelsToWatch.join(', ')}`);
+        await setupGmailWatch(tokens.access_token, env.PUBSUB_TOPIC_NAME, labelsToWatch);
+        console.log(`[OAuth Callback] Initial Gmail watch setup successful for user ${idTokenPayload.sub}`);
+      } catch(watchError: any) {
+          console.error(`[OAuth Callback] Failed to setup initial Gmail watch for user ${idTokenPayload.sub}: ${watchError.message}`);
+      }
+    } else {
+        console.log(`[OAuth Callback] No labels configured to watch for user ${idTokenPayload.sub}. Skipping initial watch setup.`);
+    }
+    */
+    console.log(`[OAuth Callback] User ${idTokenPayload.sub} authenticated. Tokens stored.`);
+
+    // --- Gmail OTP Automation Setup ---
+    const currentTokenData = await tokenStoreStub.getTokenByUserId(idTokenPayload.sub);
+    if (currentTokenData && !currentTokenData.isGmailAutomationSetup) {
+      console.log(`[OAuth Callback] User ${idTokenPayload.sub}: Gmail OTP automation not yet set up. Attempting setup...`);
+      try {
+        const automationResult = await setupGmailOtpAutomation(tokens.access_token, idTokenPayload.sub);
+        // Simplified log for automation result
+        if (automationResult.success) {
+            console.log(`[OAuth Callback] User ${idTokenPayload.sub}: Gmail OTP Automation successful. LabelID: ${automationResult.otpLabelId}, FilterID: ${automationResult.filterId}`);
+        } else {
+            console.error(`[OAuth Callback] User ${idTokenPayload.sub}: Gmail OTP Automation FAILED. Message: ${automationResult.message}`);
+        }
+
+        if (automationResult.success && automationResult.otpLabelId) {
+          await tokenStoreStub.updateOtpLabelAndFilterIds(idTokenPayload.sub, automationResult.otpLabelId, automationResult.filterId ?? null);
+          await tokenStoreStub.markGmailAutomationSetupComplete(idTokenPayload.sub, true);
+          await tokenStoreStub.updateWatchedLabelIds(idTokenPayload.sub, [automationResult.otpLabelId]);
+          // console.log(`[OAuth Callback] User ${idTokenPayload.sub}: Stored OTP Label ID ${automationResult.otpLabelId} and Filter ID ${automationResult.filterId ?? 'N/A'}. Marked setup complete. Now watching OTP label.`); // Remove this more verbose log
+
+          const setupWatchResult = await setupGmailWatch(tokens.access_token, env.PUBSUB_TOPIC_NAME, [automationResult.otpLabelId]);
+          await tokenStoreStub.updateHistoryId(idTokenPayload.sub, setupWatchResult.historyId);
+          console.log(`[OAuth Callback] User ${idTokenPayload.sub}: Gmail watch started for OTP label. History ID: ${setupWatchResult.historyId}`);
+
+        } else {
+          console.error(`[OAuth Callback] User ${idTokenPayload.sub}: Gmail OTP automation setup failed: ${automationResult.message}`);
+          // Do not mark as setup, it can be retried on next login or manually
+        }
+      } catch (automationError: any) {
+        console.error(`[OAuth Callback] User ${idTokenPayload.sub}: Exception during Gmail OTP automation setup: ${automationError.message}`);
+      }
+    } else if (currentTokenData && currentTokenData.isGmailAutomationSetup && currentTokenData.otpLabelId) {
+      console.log(`[OAuth Callback] User ${idTokenPayload.sub}: Gmail OTP automation already set up. Ensuring watch is active for OTP label: ${currentTokenData.otpLabelId}`);
+      try {
+        // Ensure watch is active for the OTP label
+        const setupWatchResult = await setupGmailWatch(tokens.access_token, env.PUBSUB_TOPIC_NAME, [currentTokenData.otpLabelId]);
+        await tokenStoreStub.updateHistoryId(idTokenPayload.sub, setupWatchResult.historyId);
+        console.log(`[OAuth Callback] User ${idTokenPayload.sub}: Gmail watch refreshed for OTP label. History ID: ${setupWatchResult.historyId}`);
+      } catch (watchError: any) {
+          console.error(`[OAuth Callback] User ${idTokenPayload.sub}: Failed to refresh Gmail watch for OTP label: ${watchError.message}`);
+      }
+    } else {
+        console.warn(`[OAuth Callback] User ${idTokenPayload.sub}: Cannot determine Gmail automation status or missing OTP label ID. Skipping automatic watch setup.`);
+    }
+
+    // Redirect back to extension
+    const redirectUrl = session.redirectUrl || 'chrome-extension://your-extension-id/callback.html'; // Placeholder
+    const redirectWithToken = `${redirectUrl}?id_token=${tokens.id_token}`;
+    return Response.redirect(redirectWithToken, 302);
+
+  } catch (error: any) {
+    console.error('Error in OAuth callback:', error);
+    return new Response('Error in OAuth callback: ' + error.message, { status: 500 });
+  }
+});
+
+// Routes: /auth/token and /auth/refresh - These seem specific to a different auth flow (e.g., extension manual code entry?)
+// They currently store tokens in KV. They should be updated to use TokenStoreDO if this flow is still needed.
+// For now, commenting them out as they rely on the removed KV storeUserTokens.
+/*
+router.post('/auth/token', ...);
+router.post('/auth/refresh', ...);
+*/
+
+// Route: /websocket/:userId (Actual WebSocket connection)
+router.get('/websocket/:userId', async (request: Request, env: Env, ctx: ExecutionContext): Promise<Response> => {
+  const requestUrl = new URL(request.url);
+  const userId = (request as any).params?.userId;
+
+  if (!userId || typeof userId !== 'string') {
+    console.error(`[WebSocket Route V3] Critical: userId from request.params is invalid. Value: '${userId}', Type: ${typeof userId}. Full params: ${JSON.stringify((request as any).params)}`);
+    return new Response('User ID (from path :userId) is required, string, and was not correctly found.', { status: 400 });
+  }
+
+  // Log the exact userId being passed to getWebSocketHubStub - KEEPING THIS LOG FOR NOW
+  console.log(`[WebSocket Route V3] Extracted valid userId: '${userId}'. Calling getWebSocketHubStub.`);
+
+  const wsHubStub = getWebSocketHubStub(env, userId);
+
+  // *** REINSTATE HEADER WORKAROUND ***
+  // Create a new Headers object for the DO fetch, including the X-User-Id
+  const doRequestHeaders = new Headers(request.headers);
+  doRequestHeaders.set('X-User-Id', userId);
+
+  // Create a new request to pass to the DO, with the added header
+  const doRequest = new Request(request.url, {
+    method: request.method,
+    headers: doRequestHeaders,
+    // For a WebSocket upgrade GET request, body is null, redirect is manual.
+    // If other properties are needed, copy them from original `request`
+  });
+
+  // return wsHubStub.fetch(request); // Incorrect call without header
+  return wsHubStub.fetch(doRequest); // Correct call with header
+});
+
+// Legacy WebSocket route - /websocket?userId=...
+router.get('/websocket', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const url = new URL(request.url);
+    const userId = url.searchParams.get('userId');
+    if (!userId) return new Response('Missing userId parameter', { status: 400 });
+
+    const wsHubStub = getWebSocketHubStub(env, userId);
+
+    // Forward the request to the DO.
+    return wsHubStub.fetch(request);
+
+  } catch (error: any) {
+    console.error(`[WebSocket Route Legacy] Error handling connection: ${error.message}`);
+    return new Response(`WebSocket connection error: ${error.message}`, { status: 500 });
+  }
+});
+
+// Route: Generate a JWT token for WebSocket authentication
+// This seems to create a simple non-standard JWT. Consider using a proper library or mechanism.
+router.post('/auth/ws-token', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const body = await request.json() as { idToken?: string };
+    if (!body.idToken) return new Response(JSON.stringify({ error: 'missing_id_token' }), { status: 400 });
+
+    const idTokenPayload = await verifyAndDecodeIdToken(body.idToken, env.GOOGLE_CLIENT_ID);
+    const userId = idTokenPayload.sub;
+
+    // Simple base64 encoded token (NOT a secure JWT)
+    const wsTokenPayload = { sub: userId, exp: Math.floor(Date.now() / 1000) + 3600, iat: Math.floor(Date.now() / 1000) };
+    const encodedToken = btoa(JSON.stringify(wsTokenPayload)); // Basic encoding, not secure signing
+
+    return new Response(JSON.stringify({ token: encodedToken, userId: userId }), { headers: { 'Content-Type': 'application/json' }});
+
+  } catch (error: any) {
+    console.error('Error generating WebSocket token:', error);
+    return new Response(JSON.stringify({ error: 'server_error' }), { status: 500 });
+  }
+});
+
+// Route: Watch Gmail for changes (manual trigger, potentially for testing/initiation)
+// Should use TokenStoreDO now
+router.post('/api/watch-gmail', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return new Response('Unauthorized', { status: 401 });
+    const token = authHeader.substring(7); // ID Token
+
+    const idTokenPayload = await verifyAndDecodeIdToken(token, env.GOOGLE_CLIENT_ID);
+    const userId = idTokenPayload.sub;
+    const tokenStoreStub = getTokenStoreDOStub(env);
+
+    // Get a valid access token FROM TokenStoreDO
+    const accessToken = await tokenStoreStub.getValidAccessToken(userId);
+
+    const { historyId } = await setupGmailWatch(accessToken, env.PUBSUB_TOPIC_NAME, ['INBOX']);
+
+    // Store history ID FOR TokenStoreDO
+    await tokenStoreStub.updateHistoryId(userId, historyId);
+
+    return new Response(JSON.stringify({ success: true, historyId }), { headers: { 'Content-Type': 'application/json' }});
+  } catch (error: any) {
+    console.error('Error setting up Gmail watch:', error);
+    return new Response(JSON.stringify({ success: false, error: error.message }), { status: 500 });
+  }
+});
+
+// Route: Get user's currently watched labels
+router.get('/api/get-watched-labels', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response(JSON.stringify({ error: 'unauthorized', message: 'Missing or invalid Authorization header.' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+    const idToken = authHeader.substring(7);
+    const idTokenPayload = await verifyAndDecodeIdToken(idToken, env.GOOGLE_CLIENT_ID);
+    const userId = idTokenPayload.sub;
+
+    const tokenStoreStub = getTokenStoreDOStub(env);
+    const tokenData = await tokenStoreStub.getTokenByUserId(userId);
+
+    if (!tokenData) {
+      return new Response(JSON.stringify({ error: 'not_found', message: 'User token data not found.' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    const watchedLabelIds = tokenData.watchedLabelIds || ['INBOX']; // Default if somehow not set
+    return new Response(JSON.stringify({ watchedLabelIds }), { headers: { 'Content-Type': 'application/json' } });
+
+  } catch (error: any) {
+    console.error('[Get Watched Labels] Error:', error);
+    return new Response(JSON.stringify({ error: 'server_error', message: error.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+});
+
+// Route: Update user's watched labels and re-initiate Gmail watch
+router.post('/api/update-watched-labels', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response(JSON.stringify({ error: 'unauthorized', message: 'Missing or invalid Authorization header.' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+    const idToken = authHeader.substring(7);
+    const idTokenPayload = await verifyAndDecodeIdToken(idToken, env.GOOGLE_CLIENT_ID);
+    const userId = idTokenPayload.sub;
+
+    const body = await request.json() as { labelIds?: string[] };
+    if (!body.labelIds || !Array.isArray(body.labelIds) || body.labelIds.some(id => typeof id !== 'string')) {
+      return new Response(JSON.stringify({ error: 'bad_request', message: 'Invalid or missing labelIds array.' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    }
+    const newLabelIds = body.labelIds;
+    console.log(`[Update Watched Labels] User ${userId} requested update to labels: [${newLabelIds.join(', ')}]`);
+
+    const tokenStoreStub = getTokenStoreDOStub(env);
+    const accessToken = await tokenStoreStub.getValidAccessToken(userId);
+
+    // 1. Stop existing Gmail watch (always do this before updating preferences or starting new)
+    try {
+      console.log(`[Update Watched Labels] User ${userId} stopping existing Gmail watch.`);
+      await stopGmailWatch(accessToken);
+      console.log(`[Update Watched Labels] User ${userId} successfully stopped existing Gmail watch.`);
+    } catch (stopWatchError: any) {
+      console.warn(`[Update Watched Labels] User ${userId} error stopping Gmail watch: ${stopWatchError.message}. This might be okay if no watch was active.`);
+    }
+
+    // 2. Update stored label preferences
+    await tokenStoreStub.updateWatchedLabelIds(userId, newLabelIds);
+    console.log(`[Update Watched Labels] User ${userId} DB updated with new labels: [${newLabelIds.join(', ')}]`);
+
+    if (newLabelIds.length === 0) {
+      console.log(`[Update Watched Labels] User ${userId} provided an empty label list. Watch will remain stopped.`);
+      // Ensure historyId is cleared if watch is stopped and no new labels are set.
+      await tokenStoreStub.updateHistoryId(userId, ""); // Pass empty string or null to clear
+      console.log(`[Update Watched Labels] User ${userId} historyId cleared as no labels are watched.`);
+      return new Response(JSON.stringify({ success: true, message: 'Watch stopped and no labels are currently being monitored.' }), { headers: { 'Content-Type': 'application/json' } });
+    }
+
+    // 3. Setup new Gmail watch with new labels (only if newLabelIds is not empty)
+    console.log(`[Update Watched Labels] User ${userId} setting up new Gmail watch for labels: [${newLabelIds.join(', ')}]`);
+    const { historyId } = await setupGmailWatch(accessToken, env.PUBSUB_TOPIC_NAME, newLabelIds);
+    console.log(`[Update Watched Labels] User ${userId} successfully set up new Gmail watch. New historyId: ${historyId}`);
+
+    // 4. Store the new historyId
+    await tokenStoreStub.updateHistoryId(userId, historyId);
+    console.log(`[Update Watched Labels] User ${userId} stored new historyId.`);
+
+    return new Response(JSON.stringify({ success: true, message: 'Watched labels updated and Gmail watch re-initialized.', newHistoryId: historyId }), { headers: { 'Content-Type': 'application/json' } });
+
+  } catch (error: any) {
+    console.error('[Update Watched Labels] Error:', error);
+    if (error.message && error.message.includes('No token data found for user')) {
+        return new Response(JSON.stringify({ error: 'not_found', message: error.message }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ error: 'server_error', message: error.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+});
+
+// Route: Stop Gmail watch entirely for the user
+router.post('/api/stop-watch', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response(JSON.stringify({ error: 'unauthorized', message: 'Missing or invalid Authorization header.' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+    const idToken = authHeader.substring(7);
+    const idTokenPayload = await verifyAndDecodeIdToken(idToken, env.GOOGLE_CLIENT_ID);
+    const userId = idTokenPayload.sub;
+
+    console.log(`[Stop Watch] User ${userId} requested to stop Gmail watch.`);
+
+    const tokenStoreStub = getTokenStoreDOStub(env);
+    const accessToken = await tokenStoreStub.getValidAccessToken(userId);
+
+    // 1. Stop existing Gmail watch
+    await stopGmailWatch(accessToken);
+    console.log(`[Stop Watch] User ${userId} successfully stopped Gmail watch via API.`);
+
+    // 2. Update stored label preferences to empty
+    await tokenStoreStub.updateWatchedLabelIds(userId, []);
+    console.log(`[Stop Watch] User ${userId} watchedLabelIds cleared in DB.`);
+
+    // 3. Clear historyId
+    await tokenStoreStub.updateHistoryId(userId, ""); // Pass empty string or null
+    console.log(`[Stop Watch] User ${userId} historyId cleared in DB.`);
+
+    return new Response(JSON.stringify({ success: true, message: 'Gmail watch successfully stopped.' }), { headers: { 'Content-Type': 'application/json' } });
+
+  } catch (error: any) {
+    console.error('[Stop Watch] Error:', error);
+    if (error.message && error.message.includes('No token data found for user')) {
+        return new Response(JSON.stringify({ error: 'not_found', message: error.message }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ error: 'server_error', message: error.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+});
+
+// Route: List user's Gmail labels
+router.get('/api/list-labels', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response(JSON.stringify({ error: 'unauthorized', message: 'Missing or invalid Authorization header.' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+    const idToken = authHeader.substring(7);
+    const idTokenPayload = await verifyAndDecodeIdToken(idToken, env.GOOGLE_CLIENT_ID);
+    const userId = idTokenPayload.sub;
+
+    const tokenStoreStub = getTokenStoreDOStub(env);
+
+    // Get a valid access token to call the Gmail API
+    const accessToken = await tokenStoreStub.getValidAccessToken(userId);
+
+    // List the labels
+    const labels = await listGmailLabels(accessToken);
+
+    return new Response(JSON.stringify({ labels }), { headers: { 'Content-Type': 'application/json' } });
+
+  } catch (error: any) {
+    console.error('[List Labels] Error:', error);
+    if (error.message && error.message.includes('No token data found for user')) {
+        return new Response(JSON.stringify({ error: 'not_found', message: error.message }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+    }
+     if (error.message && error.message.includes('Failed to list Gmail labels')) {
+        // Pass through specific Gmail API errors if needed
+        return new Response(JSON.stringify({ error: 'gmail_api_error', message: error.message }), { status: 502, headers: { 'Content-Type': 'application/json' } }); // Bad Gateway
+    }
+    return new Response(JSON.stringify({ error: 'server_error', message: error.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+});
+
+// Route: Receive Pub/Sub notifications
+router.post('/pubsub', async (request: Request, env: Env, ctx: ExecutionContext): Promise<Response> => {
+  try {
+    console.log('[PubSub] Received PubSub notification');
+    // Removed JWT validation for simplicity - RE-ENABLE FOR PRODUCTION
+    // const authHeader = request.headers.get('Authorization'); ... validatePubSubJwt ...
+
+    const body = await request.json() as any; // Use any for flexibility during parsing attempts
+    const notification = parsePubSubMessage(body);
+    console.log(`[PubSub] Parsed notification for ${notification.emailAddress}, historyId: ${notification.historyId}`);
+
+    // Prepare config for gmailService function, including WebSocketHub namespace
+    const gmailConfig: import('./services/gmailService').GmailHandlerConfig = {
+        tokenStoreDONamespace: env.TOKEN_STORE_DO,
+        webSocketHubDONamespace: env.WEBSOCKET_HUB,
+        openAIApiKey: env.OPENAI_API_KEY,
+        openAIModelName: env.OPENAI_MODEL_NAME,
+        openAIEndpoint: env.OPENAI_ENDPOINT,
+    };
+
+    // Call the consolidated handler from gmailService.ts
+    // Use ctx.waitUntil to allow processing after response is sent to Pub/Sub
+    ctx.waitUntil(handleGmailPushNotification(gmailConfig, notification)
+        .then(() => {
+            console.log(`[PubSub] Finished background processing for notification: ${notification.historyId}`);
+        })
+        .catch(err => {
+            console.error(`[PubSub] Background processing failed for notification ${notification.historyId}:`, err);
+        })
+    );
+
+    // Acknowledge Pub/Sub immediately
+    return new Response('Notification received', { status: 200 });
+
+  } catch (error: any) {
+    console.error('Error handling Pub/Sub notification:', error);
+    // Return 500 to indicate failure to Pub/Sub, causing potential retries
+    return new Response(`Error handling Pub/Sub notification: ${error.message}`, { status: 500 });
+  }
+});
+
+// Route: Logout user - stop Gmail watch and delete tokens
+router.post('/auth/logout', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response(JSON.stringify({ error: 'unauthorized', message: 'Missing or invalid Authorization header.' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+    const idToken = authHeader.substring(7); // Extract token after 'Bearer '
+
+    const idTokenPayload = await verifyAndDecodeIdToken(idToken, env.GOOGLE_CLIENT_ID);
+    const userId = idTokenPayload.sub;
+
+    console.log(`[Logout] Initiating logout for user ${userId}`);
+
+    const tokenStoreStub = getTokenStoreDOStub(env);
+
+    // 1. Get current access token to stop the watch
+    let accessTokenForWatchStop: string | null = null;
+    try {
+      accessTokenForWatchStop = await tokenStoreStub.getValidAccessToken(userId);
+    } catch (error: any) {
+      console.warn(`[Logout] User ${userId}: Could not retrieve access token to stop Gmail watch (possibly already expired or tokens deleted): ${error.message}`);
+      // Continue with logout even if we can't get the token, as the main goal is to clear data
+    }
+
+    // 2. Stop Gmail Watch if we got an access token
+    if (accessTokenForWatchStop) {
+      try {
+        console.log(`[Logout] User ${userId}: Attempting to stop Gmail watch.`);
+        await stopGmailWatch(accessTokenForWatchStop); // Using the function from gmailService.ts
+        console.log(`[Logout] User ${userId}: Successfully stopped Gmail watch.`);
+      } catch (watchError: any) {
+        console.error(`[Logout] User ${userId}: Failed to stop Gmail watch: ${watchError.message}. Proceeding with token deletion.`);
+      }
+
+      // 2b. Revoke Google Token
+      try {
+        console.log(`[Logout] User ${userId}: Attempting to revoke Google token.`);
+        await revokeGoogleToken(accessTokenForWatchStop); // Using the access token obtained for stopping the watch
+        console.log(`[Logout] User ${userId}: Successfully requested Google token revocation.`);
+      } catch (revokeError: any) {
+        console.error(`[Logout] User ${userId}: Failed to revoke Google token: ${revokeError.message}. Proceeding with local token deletion.`);
+        // Log error but continue with deleting local tokens
+      }
+    } else {
+      console.warn(`[Logout] User ${userId}: No valid access token found, skipping Gmail watch stop and Google token revocation.`);
+    }
+
+    // 3. Delete tokens from TokenStoreDO
+    try {
+      console.log(`[Logout] User ${userId}: Attempting to delete tokens from TokenStoreDO.`);
+      await tokenStoreStub.deleteUser(userId);
+      console.log(`[Logout] User ${userId}: Successfully deleted tokens from TokenStoreDO.`);
+    } catch (deleteError: any) {
+      console.error(`[Logout] User ${userId}: Failed to delete tokens from TokenStoreDO: ${deleteError.message}.`);
+      // This is a more critical error, might want to return 500 if this fails
+      return new Response(JSON.stringify({ error: 'server_error', message: 'Failed to delete user token data.' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    return new Response(JSON.stringify({ success: true, message: 'Logout successful. Gmail watch stopped and tokens deleted.' }), { headers: { 'Content-Type': 'application/json' }});
+
+  } catch (error: any) {
+    if (error.message && (error.message.includes('Token expired') || error.message.includes('Invalid token'))) {
+      return new Response(JSON.stringify({ error: 'unauthorized', message: `ID token issue: ${error.message}` }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+    console.error('[Logout] Error during logout process:', error);
+    return new Response(JSON.stringify({ error: 'server_error', message: 'An unexpected error occurred during logout.' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+});
+
+// Removed /register-test-user and /register-user routes that used KV store.
+// If needed, they should be reimplemented using TokenStoreDO.
+
+// Route: Default/404
+router.all('*', (): Response => new Response('Not Found', { status: 404 }));
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    console.log(`[Router] Request: ${request.method} ${new URL(request.url).pathname}`);
+    try {
+      return await router.handle(request, env, ctx); // Pass ctx for waitUntil
+    } catch (error: any) {
+      console.error(`[Router] Error:`, error);
+      return new Response(`Server Error: ${error.message}`, { status: 500 });
+    }
+  }
+} satisfies ExportedHandler<Env>;
+
+// Export the Durable Objects
+export { WebSocketHub, TokenStoreDO }; // Ensure class names match exports in DO files
