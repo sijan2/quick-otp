@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "version": "1.0",
+  "version": "2.0",
   "name": "Quick OTP",
   "description": "An AI extension that helps you to autofill OTPs from gmail",
   "background": {
