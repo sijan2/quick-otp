@@ -11,6 +11,7 @@ interface Env {
   PUBSUB_TOPIC_NAME: string;
   GOOGLE_REDIRECT_URI: string;
   GOOGLE_PUBSUB_JWT_AUDIENCE: string;
+  WEBSOCKET_JWT_SECRET: string;
 
   // Secrets (defined via wrangler secret put)
   GOOGLE_CLIENT_ID: string;

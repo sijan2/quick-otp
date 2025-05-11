@@ -177,6 +177,65 @@ export async function verifyAndDecodeIdToken(idToken: string, clientId: string):
 }
 
 /**
+ * Generates a signed JWT for WebSocket authentication.
+ */
+export async function generateWebSocketToken(
+  userId: string,
+  jwtSecret: string,
+  expirationTimeSeconds: number = 3600 // Default to 1 hour
+): Promise<string> {
+  if (!jwtSecret) {
+    throw new Error('WEBSOCKET_JWT_SECRET is not configured.');
+  }
+  const secretKey = new TextEncoder().encode(jwtSecret);
+  const alg = 'HS256';
+
+  const jwt = await new jose.SignJWT({ sub: userId })
+    .setProtectedHeader({ alg })
+    .setIssuedAt()
+    .setExpirationTime(Math.floor(Date.now() / 1000) + expirationTimeSeconds)
+    .sign(secretKey);
+
+  return jwt;
+}
+
+/**
+ * Verifies a signed JWT for WebSocket authentication.
+ * Checks signature, expiration, and that the token's subject matches the expectedUserId.
+ */
+export async function verifyWebSocketToken(
+  token: string,
+  jwtSecret: string,
+  expectedUserId: string
+): Promise<jose.JWTPayload> {
+  if (!jwtSecret) {
+    throw new Error('WEBSOCKET_JWT_SECRET is not configured.');
+  }
+  const secretKey = new TextEncoder().encode(jwtSecret);
+  const alg = 'HS256';
+
+  try {
+    const { payload } = await jose.jwtVerify(token, secretKey, {
+      algorithms: [alg],
+      // No need to specify audience or issuer here unless you set them during signing
+    });
+
+    if (!payload.sub || payload.sub !== expectedUserId) {
+      throw new Error('Token subject (sub) does not match expected user ID.');
+    }
+
+    // jose.jwtVerify automatically checks 'exp' and 'iat' if present and valid.
+    // It will throw if the token is expired.
+
+    return payload;
+  } catch (error: any) {
+    // Log specific jose errors if needed, or rethrow a generic one
+    console.error('[AuthService] WebSocket JWT verification failed:', error.message);
+    throw new Error(`WebSocket token verification failed: ${error.message}`);
+  }
+}
+
+/**
  * Revokes a Google OAuth token (access token or refresh token).
  */
 export async function revokeGoogleToken(token: string): Promise<void> {

@@ -9,7 +9,8 @@ import {
   generatePKCE,
   exchangeCodeForTokens,
   verifyAndDecodeIdToken,
-  revokeGoogleToken
+  revokeGoogleToken,
+  generateWebSocketToken
 } from './services/authService';
 import { setupGmailWatch, handleGmailPushNotification, stopGmailWatch, listGmailLabels, setupGmailOtpAutomation } from './services/gmailService';
 import { parsePubSubMessage } from './services/pubsubService';
@@ -216,20 +217,27 @@ router.get('/websocket', async (request: Request, env: Env): Promise<Response> =
 router.post('/auth/ws-token', async (request: Request, env: Env): Promise<Response> => {
   try {
     const body = await request.json() as { idToken?: string };
-    if (!body.idToken) return new Response(JSON.stringify({ error: 'missing_id_token' }), { status: 400 });
+    if (!body.idToken) return new Response(JSON.stringify({ error: 'missing_id_token' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
 
     const idTokenPayload = await verifyAndDecodeIdToken(body.idToken, env.GOOGLE_CLIENT_ID);
     const userId = idTokenPayload.sub;
 
-    // Simple base64 encoded token (NOT a secure JWT)
-    const wsTokenPayload = { sub: userId, exp: Math.floor(Date.now() / 1000) + 3600, iat: Math.floor(Date.now() / 1000) };
-    const encodedToken = btoa(JSON.stringify(wsTokenPayload)); // Basic encoding, not secure signing
+    if (!env.WEBSOCKET_JWT_SECRET) {
+      console.error('[WS Token Route] CRITICAL: WEBSOCKET_JWT_SECRET is not set in environment.');
+      return new Response(JSON.stringify({ error: 'server_configuration_error', message: 'WebSocket token generation is misconfigured.' }), { status: 500, headers: { 'Content-Type': 'application/json' }});
+    }
 
-    return new Response(JSON.stringify({ token: encodedToken, userId: userId }), { headers: { 'Content-Type': 'application/json' }});
+    // Generate a signed JWT for WebSocket authentication
+    const wsToken = await generateWebSocketToken(userId, env.WEBSOCKET_JWT_SECRET);
+
+    return new Response(JSON.stringify({ token: wsToken, userId: userId }), { headers: { 'Content-Type': 'application/json' }});
 
   } catch (error: any) {
     console.error('Error generating WebSocket token:', error);
-    return new Response(JSON.stringify({ error: 'server_error' }), { status: 500 });
+    if (error.message && (error.message.includes('Token expired') || error.message.includes('Invalid token') || error.message.includes('Failed to verify ID token'))) {
+        return new Response(JSON.stringify({ error: 'invalid_id_token', message: error.message }), { status: 401, headers: { 'Content-Type': 'application/json' }});
+    }
+    return new Response(JSON.stringify({ error: 'server_error', message: 'Failed to generate WebSocket token.' }), { status: 500, headers: { 'Content-Type': 'application/json' }});
   }
 });
 

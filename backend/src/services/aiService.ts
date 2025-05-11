@@ -39,7 +39,7 @@ Before attempting to extract any data, you MUST first classify the email's inten
 
 2.  **Simply Informational or a Notification (NOT directly actionable for OTP/link extraction)?**
     * **Login Notifications/Security Alerts:** Emails stating "Successful login from [device/location]", "We detected a new sign-in", "Your account was accessed". These are informational, even if they contain links to "change password" as a precaution. The key is they are *not* providing a code/link to *complete the login that just occurred*.
-    * **Password Changed Confirmations:** Emails stating "Your password has been successfully changed."
+    * **Password Changed Confirmations:** Emails confirming that a password has *already been changed* (e.g., "Your password has been successfully changed," "You updated the password for your account"). These are notifications of a completed action. Even if they contain a link to reset the password or secure the account as a precautionary measure (e.g., "If this wasn\'t you, reset your password"), the email\'s primary purpose is informational confirmation, not to provide an item for an *in-progress* reset initiated by the user. For these, the output should be \`{ "code": null, "url": null }\`.
     * **Two-Factor Authentication (2FA) Setup/Informational:** Emails encouraging 2FA setup or explaining how it works, unless they provide a code/link *for an ongoing setup process*.
     * **General Security Advice:** Tips for account security.
     * **Promotional emails, newsletters, receipts, support ticket updates.**
@@ -80,7 +80,7 @@ Before attempting to extract any data, you MUST first classify the email's inten
 * **Input Email Snippet (Actionable - URL):** "Thanks for signing up! Please click here to confirm your email address: https://service.example.com/confirm?token=xyz123"
     **Output:** \`{ "code": null, "url": "https://service.example.com/confirm?token=xyz123" }\`
 
-* **Input Email Snippet (Informational - Login Notification - LIKE YOUR TWITCH EXAMPLE):** "Dear User, This email confirms a successful log-in to your account from New York. If this wasn't you, please secure your account by changing your password here: [link to general security page]."
+* **Input Email Snippet (Informational - Login Notification - LIKE YOUR TWITCH EXAMPLE):** "Hi/Dear User, You updated the password for your [AccountName] account on [Date/Time]. If this was you, then no further action is required. If this wasn't you, please secure your account by changing your password here: [link to general security page]."
     **Output:** \`{ "code": null, "url": null }\` (Because the primary purpose is notification, not providing a code/link to *complete* that login)
 
 * **Input Email Snippet (Actionable, but code is part of URL text):** "Follow this link to reset your Mimo password: https://mimo.example.com/reset/a9fbad2f . The link contains your reset token."

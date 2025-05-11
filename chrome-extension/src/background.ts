@@ -29,14 +29,21 @@ let tokenExpiry: number = 0
 
 // Periodically check WebSocket connection (keep)
 setInterval(() => {
-  oauthManager.getTokenResponse().then(tokenResponse => {
-    if (!tokenResponse || !tokenResponse.id_token) return;
+  oauthManager.isAuthenticated().then(isAuthenticated => {
+    if (!isAuthenticated) {
+      console.log("Periodic check: User not authenticated, skipping WebSocket connection attempt.");
+      return;
+    }
+    // If authenticated, check WebSocket state directly.
+    // connectWebSocket() will handle its own token acquisition.
     if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
       console.warn("Periodic check: WebSocket disconnected, attempting to reconnect...");
       connectWebSocket();
-    } 
-  }).catch(err => {
-    console.error("Error checking token in periodic WS check:", err);
+    }
+    // If socket is OPEN or CONNECTING, this periodic check does nothing further.
+  }).catch(authErr => {
+    // This catch is for errors from oauthManager.isAuthenticated()
+    console.error("Error checking authentication status in periodic WS check:", authErr);
   });
 }, 60000);
 
@@ -132,6 +139,7 @@ function establishWebSocketConnection(wsUrl: string): void {
             if (url && !code) {
                 console.log(`[WebSocket] Auto-opening received URL: ${url.substring(0, 50)}...`);
                 openUrlInNewTab(url);
+                return; 
             }
             queueMessage({ action: "otpResultReceived", data: { code: code || null, url: url || null, messageId: serverMessage.payload.messageId || null }, timestamp: Date.now() });
 

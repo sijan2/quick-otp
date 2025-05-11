@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { verifyWebSocketToken } from '../services/authService'; // Import the new function
 
 export class WebSocketHub extends DurableObject<Env> { // Env should be from types.d.ts
   private sessions: Map<string, WebSocket> = new Map();
@@ -45,9 +46,7 @@ export class WebSocketHub extends DurableObject<Env> { // Env should be from typ
     // Determine the effective userId: Prefer explicitly passed header, then state.id.name
     const effectiveUserId = this.explicitlyPassedUserId || this.userId;
 
-    // Remove detailed comparison log
-    // console.log(`[WebSocketHub:${effectiveUserId}] Handling WebSocket upgrade attempt. (Derived from state.id.name: '${this.userId}', Header: '${this.explicitlyPassedUserId || "N/A"}')`);
-    console.log(`[WebSocketHub:${effectiveUserId}] Handling WebSocket upgrade attempt...`); // Keep simple log
+    console.log(`[WebSocketHub:${effectiveUserId}] Handling WebSocket upgrade attempt...`);
 
     // --- Token Validation Start ---
     if (!token) {
@@ -55,37 +54,38 @@ export class WebSocketHub extends DurableObject<Env> { // Env should be from typ
       return new Response("Missing authentication token", { status: 401 });
     }
 
+    if (!this.env.WEBSOCKET_JWT_SECRET) {
+      console.error(`[WebSocketHub:${effectiveUserId}] CRITICAL: WEBSOCKET_JWT_SECRET is not set in environment.`,
+        {
+          stateId: this.ctx.id.toString(),
+          stateName: this.ctx.id.name,
+          explicitlyPassedUserId: this.explicitlyPassedUserId,
+          derivedUserId: this.userId
+        }
+      );
+      return new Response("Server configuration error for WebSocket authentication", { status: 500 });
+    }
+
     try {
-      // 1. Decode Base64
-      const decodedJson = atob(token);
-      // 2. Parse JSON
-      const tokenPayload = JSON.parse(decodedJson);
+      // Verify the signed JWT
+      // verifyWebSocketToken will also check if payload.sub matches effectiveUserId
+      const tokenPayload = await verifyWebSocketToken(token, this.env.WEBSOCKET_JWT_SECRET, effectiveUserId);
 
-      // 3. Validate Claims
-      const now = Math.floor(Date.now() / 1000);
+      // Expiration is checked by verifyWebSocketToken
+      // Subject (userId) match is checked by verifyWebSocketToken
 
-      if (!tokenPayload.sub || typeof tokenPayload.sub !== 'string') {
-          console.error(`[WebSocketHub:${effectiveUserId}] Upgrade failed: Invalid or missing 'sub' claim in token.`);
-          return new Response("Invalid token claims (sub)", { status: 401 });
-      }
-
-      if (tokenPayload.sub !== effectiveUserId) {
-          // Keep error log, but simplify slightly
-          console.error(`[WebSocketHub:${effectiveUserId}] Upgrade failed: Token subject ('${tokenPayload.sub}') != effective DO userId ('${effectiveUserId}')`);
-          return new Response("Token subject mismatch with effective userId", { status: 403 }); // Forbidden
-      }
-
-      if (!tokenPayload.exp || typeof tokenPayload.exp !== 'number' || tokenPayload.exp < now) {
-          console.error(`[WebSocketHub:${effectiveUserId}] Upgrade failed: Invalid or expired 'exp' claim in token.`);
-          return new Response("Token expired or invalid expiration", { status: 401 });
-      }
-
-      console.log(`[WebSocketHub:${effectiveUserId}] Token validated successfully for user ${effectiveUserId}.`);
+      console.log(`[WebSocketHub:${effectiveUserId}] JWT validated successfully for user ${tokenPayload.sub}.`);
 
     } catch (e: any) {
-      // Keep error log
-      console.error(`[WebSocketHub:${effectiveUserId}] Upgrade failed: Error decoding/parsing token: ${e.message}`);
-      return new Response("Invalid token format", { status: 401 });
+      console.error(`[WebSocketHub:${effectiveUserId}] Upgrade failed: WebSocket token verification error: ${e.message}`);
+      // Return a generic error to the client, but log the specific reason
+      if (e.message && e.message.includes('Token subject (sub) does not match')) {
+        return new Response("Token subject mismatch", { status: 403 }); // Forbidden
+      }
+      if (e.message && (e.message.includes('expired') || e.message.includes('expiration'))){
+        return new Response("Token expired", { status: 401 });
+      }
+      return new Response("Invalid or expired token", { status: 401 });
     }
     // --- Token Validation End ---
 
