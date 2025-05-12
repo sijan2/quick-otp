@@ -34,6 +34,16 @@ export class WebSocketHub extends DurableObject<Env> { // Env should be from typ
       return this.handleInternalNotification(data);
     }
 
+    // Handle request for active connection count
+    if (path === "/internal/get-connection-count" && request.method === "GET") {
+      const activeConnections = this.ctx.getWebSockets().length;
+      console.log(`[WebSocketHub:${this.userId}] Reporting active connections: ${activeConnections}`);
+      return new Response(JSON.stringify({ activeConnections }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     // Log other paths for debugging
     console.log(`[WebSocketHub:${this.userId}] Received request for path: ${path}`);
     return new Response("Not found", { status: 404 });

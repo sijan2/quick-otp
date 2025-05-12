@@ -272,6 +272,35 @@ export async function handleGmailPushNotification(
     accessToken = await tokenStoreStub.getValidAccessToken(userId);
     console.log(`[GmailHandler: ${userId}] Obtained valid access token.`);
 
+    // --- Check for active WebSocket connections ---
+    try {
+      const wsHubStub = getWebSocketHubDOStub(webSocketHubDONamespace, userId);
+      // The base URL for DO-to-DO fetch can be arbitrary, e.g., http://do/ or even a relative path if interpreted correctly by the stub.
+      // Using http://do/ for clarity as it signals an internal DO call.
+      const connectionCountResponse = await wsHubStub.fetch(new Request('http://do/internal/get-connection-count', { method: 'GET' }));
+      if (connectionCountResponse.ok) {
+        const { activeConnections } = await connectionCountResponse.json() as { activeConnections: number };
+        console.log(`[GmailHandler: ${userId}] Active WebSocket connections: ${activeConnections}`);
+        if (activeConnections === 0) {
+          console.log(`[GmailHandler: ${userId}] No active WebSocket connections. Skipping email processing for this notification.`);
+          // Update historyId even if skipping, to acknowledge the notification and prevent re-processing if user connects later with this old historyId.
+          const tokenDataForHistoryUpdate = await tokenStoreStub.getTokenByUserId(userId);
+          const previousHistoryIdForSkip = tokenDataForHistoryUpdate?.historyId;
+          if (newHistoryIdFromNotification && (!previousHistoryIdForSkip || newHistoryIdFromNotification !== previousHistoryIdForSkip)) {
+            console.log(`[GmailHandler: ${userId}] Updating history ID to ${newHistoryIdFromNotification} after skipping due to no active connections.`);
+            await tokenStoreStub.updateHistoryId(userId, newHistoryIdFromNotification);
+          }
+          return; // Skip further processing
+        }
+      } else {
+        // Log error but continue processing if connection count check fails, not to block essential OTPs.
+        console.warn(`[GmailHandler: ${userId}] Failed to get active WebSocket connection count. Status: ${connectionCountResponse.status}. Proceeding with email processing.`);
+      }
+    } catch (wsCheckError: any) {
+      console.warn(`[GmailHandler: ${userId}] Error checking WebSocket connections: ${wsCheckError.message}. Proceeding with email processing.`);
+    }
+    // --- End WebSocket connection check ---
+
     const tokenData = await tokenStoreStub.getTokenByUserId(userId);
     if (!tokenData) {
         console.error(`[GmailHandler: ${userId}] Critical: No token data found. Skipping.`);
