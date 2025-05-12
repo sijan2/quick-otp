@@ -15,6 +15,9 @@ Cloudflare Worker backend for Google OAuth, Gmail API interaction, and WebSocket
     *   **OAuth 2.0 Credentials (Web application):**
         *   Note Client ID & Client Secret.
         *   Authorized redirect URI: `https://<YOUR_WORKER_URL>/auth/callback` (update after first deploy).
+          ![Redacted Image Blurring Tool](https://github.com/user-attachments/assets/cf461f53-b10d-4d17-9100-05b47b77f149)
+
+          
     *   **Pub/Sub Topic:**
         *   Create a topic (e.g., `otp-notifications`). Note its full name: `projects/<GCP_PROJECT_ID>/topics/<YOUR_TOPIC_NAME>`.
     *   **Pub/Sub Subscription (for the topic):**
@@ -24,8 +27,11 @@ Cloudflare Worker backend for Google OAuth, Gmail API interaction, and WebSocket
             *   Audience: Use the push endpoint URL (e.g., `https://<YOUR_WORKER_URL>/pubsub`).
             *   Service Account: `service-{PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com`.
             *   Ensure this service account has "Pub/Sub Subscriber" and "Service Account Token Creator" roles.
-4.  **(Optional) OpenAI Account & API Key:** For AI email processing if using OpenAI.
-5.  **(Optional) Google API Key:** If using Gemini, a Google API key is needed.
+         
+![Redacted Image Blurring Tool (1)](https://github.com/user-attachments/assets/d917cb94-57a1-4bb9-a1db-573f3778657a)
+      
+4.   OpenAI Account & API Key:** For AI email processing if using OpenAI.
+5.   Google API Key:** If using Gemini, a Google API key is needed.
 
 ## Setup
 
@@ -38,40 +44,29 @@ Cloudflare Worker backend for Google OAuth, Gmail API interaction, and WebSocket
 
 2.  **Configure Wrangler Secrets:**
     In the `backend` directory, run `pnpm wrangler secret put <SECRET_NAME>` for each of the following and provide the values when prompted:
+    <img width="754" alt="94255d1b942e6ac4ebe3795690c8f886e2435d096aad8a9cc671834262248933" src="https://github.com/user-attachments/assets/a320b203-a21d-42b8-9666-8b1f35723021" />
 
-    *   **`AI_PROVIDER`**: Set to either `"openai"` or `"gemini"` to choose the AI service.
-    *   **`GOOGLE_API_KEY`**: Your Google API Key (used if `AI_PROVIDER` is `"gemini"` or for other Google services not covered by OAuth).
-    *   **`GOOGLE_CLIENT_ID`**: Your Google OAuth Client ID (from GCP).
-    *   **`GOOGLE_CLIENT_SECRET`**: Your Google OAuth Client Secret (from GCP).
-    *   **`GOOGLE_PUBSUB_JWT_AUDIENCE`**: Your Worker's Pub/Sub push endpoint URL (e.g., `https://<WORKER_NAME>.<YOUR_CF_USER>.workers.dev/pubsub`). Must match GCP Pub/Sub subscription config.
-    *   **`GOOGLE_REDIRECT_URI`**: Your Worker's OAuth callback URL (e.g., `https://<WORKER_NAME>.<YOUR_CF_USER>.workers.dev/auth/callback`). Must match GCP OAuth config.
-    *   **`OPENAI_API_KEY`**: Your OpenAI API Key (required if `AI_PROVIDER` is `"openai"`).
-    *   **`PUBSUB_TOPIC_NAME`**: Full Pub/Sub topic name from GCP (e.g., `projects/<GCP_PROJECT_ID>/topics/<YOUR_TOPIC_NAME>`).
+	 *   **`AI_PROVIDER`**: Set to either `"openai"` or `"gemini"` to choose the AI service.
+
+	 *   **`GOOGLE_PUBSUB_JWT_AUDIENCE`**: Your Worker's Pub/Sub push endpoint URL (e.g., `https://<WORKER_NAME>.<YOUR_CF_USER>.workers.dev/pubsub`). Must match GCP Pub/Sub subscription config.
+
     *   **`TOKEN_ENCRYPTION_KEY`**: A strong random string for encrypting tokens. Generate one with:
         ```bash
-        openssl rand -base64 24
+        openssl rand -hex 32
         ```
     *   **`WEBSOCKET_JWT_SECRET`**: A strong random string for signing WebSocket JWTs. Generate one similarly:
         ```bash
-        openssl rand -base64 24
+        openssl rand -hex 32
         ```
-
-    *   **(Optional) OpenAI Model/Endpoint Overrides (if `AI_PROVIDER="openai"`):**
-        *   `pnpm wrangler secret put OPENAI_MODEL_NAME`
-        *   `pnpm wrangler secret put OPENAI_ENDPOINT`
-
-    *   **(Optional) Gemini Model/Endpoint Overrides (if `AI_PROVIDER="gemini"`):**
-        *   `pnpm wrangler secret put GEMINI_MODEL_NAME`
-        *   `pnpm wrangler secret put GEMINI_ENDPOINT`
-        *   *(Note: `GOOGLE_API_KEY` is used for Gemini authentication).*
+        
 
 
-3.  **Configure `wrangler.jsonc`:**
+4.  **Configure `wrangler.jsonc`:**
     *   Update `"name"` to your desired worker name (this affects the URL).
     *   Ensure `"main"` is `"src/index.ts"`.
     *   Keep `durable_objects` bindings and `migrations` as is.
 
-4.  **Deploy:**
+5.  **Deploy:**
     ```bash
     pnpm wrangler deploy
     ```
