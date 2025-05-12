@@ -13,7 +13,14 @@ import {
   generateWebSocketToken,
   processAndStoreRefreshedGoogleTokens
 } from './services/authService';
-import { setupGmailWatch, handleGmailPushNotification, stopGmailWatch, listGmailLabels, setupGmailOtpAutomation } from './services/gmailService';
+import {
+  setupGmailWatch,
+  handleGmailPushNotification,
+  stopGmailWatch,
+  listGmailLabels,
+  setupGmailOtpAutomation,
+  recreateOtpFilter
+} from './services/gmailService';
 import { parsePubSubMessage } from './services/pubsubService';
 
 // Removed imports from deleted ./utils/token-store
@@ -612,6 +619,99 @@ router.post('/auth/logout', async (request: Request, env: Env): Promise<Response
     }
     console.error('[Logout] Error during logout process:', error);
     return new Response(JSON.stringify({ error: 'server_error', message: 'An unexpected error occurred during logout.' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+});
+
+// Route: Get user preferences (including moveToTrash)
+router.get('/api/get-user-preferences', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+    const idToken = authHeader.substring(7);
+    const idTokenPayload = await verifyAndDecodeIdToken(idToken, env.GOOGLE_CLIENT_ID);
+    const userId = idTokenPayload.sub;
+
+    const tokenStoreStub = getTokenStoreDOStub(env);
+    const tokenData = await tokenStoreStub.getTokenByUserId(userId);
+
+    if (!tokenData) {
+      return new Response(JSON.stringify({ error: 'not_found', message: 'User data not found.' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    // Return relevant preferences
+    const preferences = {
+        moveToTrash: tokenData.moveToTrash ?? false // Default to false if undefined
+        // Add other preferences here in the future if needed
+    };
+
+    return new Response(JSON.stringify(preferences), { headers: { 'Content-Type': 'application/json' } });
+
+  } catch (error: any) {
+    console.error('[Get User Preferences] Error:', error);
+    if (error.message && (error.message.includes('Token expired') || error.message.includes('Invalid token'))) {
+        return new Response(JSON.stringify({ error: 'unauthorized', message: error.message }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+     if (error.message && error.message.includes('User data not found')) {
+        return new Response(JSON.stringify({ error: 'not_found', message: error.message }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ error: 'server_error', message: error.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
+});
+
+// Route: Update moveToTrash preference and recreate filter
+router.post('/api/update-trash-preference', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+    const idToken = authHeader.substring(7);
+    const idTokenPayload = await verifyAndDecodeIdToken(idToken, env.GOOGLE_CLIENT_ID);
+    const userId = idTokenPayload.sub;
+
+    const body = await request.json() as { moveToTrash?: boolean };
+    if (typeof body.moveToTrash !== 'boolean') {
+      return new Response(JSON.stringify({ error: 'bad_request', message: 'Missing or invalid moveToTrash boolean field.' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    }
+    const moveToTrash = body.moveToTrash;
+    console.log(`[Update Trash Preference] User ${userId} setting moveToTrash to ${moveToTrash}`);
+
+    const tokenStoreStub = getTokenStoreDOStub(env);
+
+    // 1. Update preference in DO
+    await tokenStoreStub.updateMoveToTrashPreference(userId, moveToTrash);
+    console.log(`[Update Trash Preference] User ${userId} preference updated in DO.`);
+
+    // 2. Get access token
+    const accessToken = await tokenStoreStub.getValidAccessToken(userId);
+    console.log(`[Update Trash Preference] User ${userId} obtained valid access token.`);
+
+    // 3. Recreate the filter
+    const filterResult = await recreateOtpFilter(accessToken, userId, tokenStoreStub);
+
+    if (filterResult && filterResult.id) {
+      console.log(`[Update Trash Preference] User ${userId} successfully recreated filter. New/verified ID: ${filterResult.id}`);
+      return new Response(JSON.stringify({ success: true, message: 'Preference updated and filter recreated successfully.', filterId: filterResult.id }), { headers: { 'Content-Type': 'application/json' } });
+    } else {
+      console.error(`[Update Trash Preference] User ${userId} failed to recreate filter after updating preference.`);
+      // Return success=true because preference was updated, but indicate filter issue
+      return new Response(JSON.stringify({ success: true, message: 'Preference updated, but failed to recreate the Gmail filter.', filterId: null }), { status: 207, headers: { 'Content-Type': 'application/json' } }); // 207 Multi-Status might fit
+    }
+
+  } catch (error: any) {
+    const userIdLog = request.headers.get('Authorization') ? 'AuthenticatedUser' : 'UnauthenticatedUser'; // Avoid logging actual token
+    console.error(`[Update Trash Preference: ${userIdLog}] Error:`, error);
+    // Handle specific errors like invalid token, user not found, etc.
+    if (error.message && (error.message.includes('Token expired') || error.message.includes('Invalid token'))) {
+        return new Response(JSON.stringify({ error: 'unauthorized', message: error.message }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (error.message && error.message.includes('No token data found')) {
+        return new Response(JSON.stringify({ error: 'not_found', message: 'User data not found.' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+    }
+    // Default server error
+    return new Response(JSON.stringify({ error: 'server_error', message: error.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
   }
 });
 

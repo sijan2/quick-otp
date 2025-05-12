@@ -13,6 +13,7 @@ export interface TokenData {
   otpFilterId: string | null;
   isGmailAutomationSetup: boolean;
   encryptedIdToken?: string | null;
+  moveToTrash?: boolean;
 }
 
 export class TokenStoreDO extends DurableObject<Env> {
@@ -114,6 +115,7 @@ export class TokenStoreDO extends DurableObject<Env> {
       const eotpLabelId = existingTokenData?.otpLabelId;
       const eotpFilterId = existingTokenData?.otpFilterId;
       const eisGmailAutomationSetup = existingTokenData?.isGmailAutomationSetup;
+      const emoveToTrash = existingTokenData?.moveToTrash;
 
       const tokenData: TokenData = {
         encryptedRefreshToken,
@@ -126,7 +128,8 @@ export class TokenStoreDO extends DurableObject<Env> {
         otpLabelId: eotpLabelId === undefined ? null : eotpLabelId,
         otpFilterId: eotpFilterId === undefined ? null : eotpFilterId,
         isGmailAutomationSetup: eisGmailAutomationSetup === undefined ? false : eisGmailAutomationSetup,
-        encryptedIdToken: existingTokenData?.encryptedIdToken === undefined ? encryptedIdToken : (encryptedIdToken ?? existingTokenData.encryptedIdToken) // Preserve if not newly provided, else use new one
+        encryptedIdToken: existingTokenData?.encryptedIdToken === undefined ? encryptedIdToken : (encryptedIdToken ?? existingTokenData.encryptedIdToken), // Preserve if not newly provided, else use new one
+        moveToTrash: emoveToTrash === undefined ? false : emoveToTrash
       };
 
       await this.ctx.storage.put(`user:${userId}`, tokenData);
@@ -359,6 +362,26 @@ export class TokenStoreDO extends DurableObject<Env> {
       console.log(`[TokenStoreDO: ${userId}] Access token and expiry (and potentially ID token) updated after Google refresh grant.`);
     } catch (error: any) {
       console.error(`[TokenStoreDO: ${userId}] Error in updateTokensAfterRefresh: ${error.message}`);
+      throw error;
+    }
+  }
+
+  // Update moveToTrash preference
+  async updateMoveToTrashPreference(userId: string, moveToTrash: boolean): Promise<void> {
+    try {
+      const tokenData = await this.getTokenByUserId(userId);
+      if (!tokenData) {
+        throw new Error(`No token data found for user ${userId} when updating move to trash preference.`);
+      }
+      if (tokenData.moveToTrash === moveToTrash) {
+        console.log(`[TokenStoreDO] moveToTrash preference already set to ${moveToTrash} for user ${userId}. Skipping update.`);
+        return;
+      }
+      tokenData.moveToTrash = moveToTrash;
+      await this.ctx.storage.put(`user:${userId}`, tokenData);
+      console.log(`[TokenStoreDO] Updated moveToTrash preference to ${moveToTrash} for user ${userId}`);
+    } catch (error: any) {
+      console.error(`[TokenStoreDO] Error in updateMoveToTrashPreference for user ${userId}: ${error.message}`);
       throw error;
     }
   }

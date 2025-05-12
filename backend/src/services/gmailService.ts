@@ -667,48 +667,59 @@ async function ensureOtpLabelWorker(accessToken: string, labelName: string = 'ot
 async function ensureOtpFilterWorker(
   accessToken: string,
   otpLabelId: string,
-  expectedQuery: string
+  expectedQuery: string,
+  moveToTrash: boolean
 ): Promise<GmailFilterAPI | null> {
-  console.log(`[ensureOtpFilterWorker V3] Ensuring single, up-to-date OTP filter for LabelID: ${otpLabelId}.`);
+  console.log(`[ensureOtpFilterWorker V4] Ensuring single, up-to-date OTP filter for LabelID: ${otpLabelId}. MoveToTrash: ${moveToTrash}`);
 
   const existingFilters = await listGmailFilters(accessToken);
   let oldFilterDeleted = false;
 
   if (existingFilters && existingFilters.length > 0) {
-    console.log(`[ensureOtpFilterWorker V3] Found ${existingFilters.length} existing filters. Checking for old OTP filters to remove...`);
+    console.log(`[ensureOtpFilterWorker V4] Found ${existingFilters.length} existing filters. Checking for old OTP filters to remove...`);
     for (const filter of existingFilters) {
       if (filter.action?.addLabelIds?.includes(otpLabelId)) {
         // This filter applies our OTP label. We assume our app manages it.
         // Delete it to make way for the new/updated one.
-        console.log(`[ensureOtpFilterWorker V3] Found filter (ID: ${filter.id}) that applies OTP label ${otpLabelId}. Deleting it.`);
+        console.log(`[ensureOtpFilterWorker V4] Found filter (ID: ${filter.id}) that applies OTP label ${otpLabelId}. Deleting it.`);
         try {
           await deleteGmailFilter(accessToken, filter.id);
           oldFilterDeleted = true;
-          console.log(`[ensureOtpFilterWorker V3] Successfully deleted old filter ID: ${filter.id}`);
+          console.log(`[ensureOtpFilterWorker V4] Successfully deleted old filter ID: ${filter.id}`);
         } catch (deleteError: any) {
-          console.warn(`[ensureOtpFilterWorker V3] Failed to delete old filter ID: ${filter.id}. Error: ${deleteError.message}. Will proceed to create new filter anyway.`);
+          console.warn(`[ensureOtpFilterWorker V4] Failed to delete old filter ID: ${filter.id}. Error: ${deleteError.message}. Will proceed to create new filter anyway.`);
           // Continue, as the old filter might be orphaned or already gone.
         }
       }
     }
   } else {
-    console.log("[ensureOtpFilterWorker V3] No existing filters found for the user.");
+    console.log("[ensureOtpFilterWorker V4] No existing filters found for the user.");
   }
   if (oldFilterDeleted) {
-    console.log("[ensureOtpFilterWorker V3] Finished attempting to delete old OTP filters.");
+    console.log("[ensureOtpFilterWorker V4] Finished attempting to delete old OTP filters.");
   } else {
-    console.log("[ensureOtpFilterWorker V3] No old OTP filters (that apply the specified label) found or deleted.");
+    console.log("[ensureOtpFilterWorker V4] No old OTP filters (that apply the specified label) found or deleted.");
   }
 
   // Always create a new filter with the latest query and actions.
-  console.log(`[ensureOtpFilterWorker V3] Creating new OTP filter with query: ${expectedQuery.substring(0,100)}...`);
+  console.log(`[ensureOtpFilterWorker V4] Creating new OTP filter with query: ${expectedQuery.substring(0,100)}...`);
   const createFilterUrl = 'https://gmail.googleapis.com/gmail/v1/users/me/settings/filters';
+
+  // Base action
+  const action: { addLabelIds: string[]; removeLabelIds: string[] } = {
+    addLabelIds: [otpLabelId],
+    removeLabelIds: ['UNREAD'],
+  };
+
+  // Conditionally add TRASH label
+  if (moveToTrash) {
+    action.addLabelIds.push('TRASH');
+    console.log(`[ensureOtpFilterWorker V4] Adding 'TRASH' label to filter action.`);
+  }
+
   const filterPayload = {
       criteria: { query: expectedQuery },
-      action: {
-          addLabelIds: [otpLabelId],
-          removeLabelIds: ['UNREAD'],
-      },
+      action: action, // Use the constructed action
   };
   // console.log(`[ensureOtpFilterWorker V3] New filter PAYLOAD: ${JSON.stringify(filterPayload)}`); // Keep for debugging if needed
 
@@ -720,17 +731,17 @@ async function ensureOtpFilterWorker(
       });
       const responseStatus = response.status;
       const responseBodyText = await response.text();
-      console.log(`[ensureOtpFilterWorker V3] Create Filter API STATUS: ${responseStatus}, BODY (first 500 chars): ${responseBodyText.substring(0, 500)}`);
+      console.log(`[ensureOtpFilterWorker V4] Create Filter API STATUS: ${responseStatus}, BODY (first 500 chars): ${responseBodyText.substring(0, 500)}`);
 
       if (!response.ok) {
-          console.error(`[ensureOtpFilterWorker V3] Create Filter API FAILED.`);
+          console.error(`[ensureOtpFilterWorker V4] Create Filter API FAILED.`);
           return null;
       }
       const createdFilter: GmailFilterAPI = JSON.parse(responseBodyText);
-      console.log(`[ensureOtpFilterWorker V3] Create Filter API SUCCESS. New Filter ID: ${createdFilter.id}`);
+      console.log(`[ensureOtpFilterWorker V4] Create Filter API SUCCESS. New Filter ID: ${createdFilter.id}`);
       return createdFilter;
   } catch (error: any) {
-      console.error(`[ensureOtpFilterWorker V3] Create Filter API EXCEPTION: ${error.message}`);
+      console.error(`[ensureOtpFilterWorker V4] Create Filter API EXCEPTION: ${error.message}`);
       return null;
   }
 }
@@ -749,7 +760,7 @@ export async function setupGmailOtpAutomation(
             return { success: false, message: 'Failed to ensure "otp" label.', otpLabelId: null, filterId: null, labelEnsured: false, filterOperationAttempted: false };
         }
         const expectedFilterQuery = getOtpFilterQuery();
-        finalFilter = await ensureOtpFilterWorker(accessToken, labelResult.id, expectedFilterQuery);
+        finalFilter = await ensureOtpFilterWorker(accessToken, labelResult.id, expectedFilterQuery, false);
 
         if (!finalFilter || !finalFilter.id) {
             console.error(`[GmailService: ${userId}] OTP filter setup step failed.`);
@@ -764,5 +775,51 @@ export async function setupGmailOtpAutomation(
     } catch (error: any) {
         console.error(`[GmailService: ${userId}] Overall EXCEPTION during OTP automation setup: ${error.message}`);
         return { success: false, message: error.message, otpLabelId: labelResult.id, filterId: finalFilter?.id || null, labelEnsured: !!labelResult.id, filterOperationAttempted: true };
+    }
+}
+
+/**
+ * Recreates the OTP filter based on the stored preference in TokenStoreDO.
+ */
+export async function recreateOtpFilter(
+    accessToken: string,
+    userId: string,
+    tokenStoreStub: TokenStoreDO
+): Promise<GmailFilterAPI | null> {
+    console.log(`[GmailService: ${userId}] Recreating OTP filter based on stored preference.`);
+    try {
+        const tokenData = await tokenStoreStub.getTokenByUserId(userId);
+        if (!tokenData) {
+            throw new Error("No token data found for user.");
+        }
+        if (!tokenData.otpLabelId) {
+            console.warn(`[GmailService: ${userId}] Cannot recreate filter: OTP Label ID is missing.`);
+            return null;
+        }
+
+        const moveToTrash = tokenData.moveToTrash ?? false; // Default to false if undefined
+        const expectedFilterQuery = getOtpFilterQuery();
+
+        console.log(`[GmailService: ${userId}] Calling ensureOtpFilterWorker. LabelID: ${tokenData.otpLabelId}, MoveToTrash: ${moveToTrash}`);
+        const updatedFilter = await ensureOtpFilterWorker(
+            accessToken,
+            tokenData.otpLabelId,
+            expectedFilterQuery,
+            moveToTrash
+        );
+
+        if (updatedFilter && updatedFilter.id && updatedFilter.id !== tokenData.otpFilterId) {
+            console.log(`[GmailService: ${userId}] Filter recreated/updated. New Filter ID: ${updatedFilter.id}. Storing new ID.`);
+            await tokenStoreStub.updateOtpLabelAndFilterIds(userId, tokenData.otpLabelId, updatedFilter.id);
+        } else if (updatedFilter && updatedFilter.id) {
+            console.log(`[GmailService: ${userId}] Filter recreated/verified. Filter ID remains: ${updatedFilter.id}.`);
+        } else {
+            console.error(`[GmailService: ${userId}] Failed to recreate OTP filter.`);
+        }
+
+        return updatedFilter;
+    } catch (error: any) {
+        console.error(`[GmailService: ${userId}] Error in recreateOtpFilter: ${error.message}`);
+        throw error; // Re-throw to be handled by the caller (e.g., API endpoint)
     }
 }
