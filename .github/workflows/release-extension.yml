@@ -21,7 +21,7 @@ jobs:
     - name: Zip Chrome extension
       run: |
         mkdir -p build-output
-        zip -r "build-output/quick-otp-v.${{ env.VERSION }}.zip" chrome-extsnion/
+        zip -r "build-output/quick-otp-v.${{ env.VERSION }}.zip" chrome-extension/
 
     - name: Create GitHub Release
       id: create_release
