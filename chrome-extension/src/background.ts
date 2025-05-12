@@ -30,23 +30,40 @@ let tokenExpiry: number = 0
 // Periodically check WebSocket connection (keep)
 setInterval(async () => {
   try {
-    const isAuthenticated = await oauthManager.isAuthenticated();
+    const tokenResponse = await oauthManager.getTokenResponse(); // Get the raw token response first
+
+    if (!tokenResponse || !tokenResponse.id_token) {
+      // NO local token AT ALL. User is properly logged out.
+      // The periodic check should NOT try to initiate a new login.
+      console.log("Periodic check: No local token response. User is logged out. Waiting for manual login.");
+      if (socket && socket.readyState === WebSocket.OPEN) { // If socket is somehow open, close it.
+          console.warn("Periodic check: Closing WebSocket as user is logged out.");
+          intentionalDisconnect = true;
+          socket.close(1001, "User logged out, periodic check.");
+          socket = null;
+      }
+      return; // Exit the periodic check for auth purposes
+    }
+
+    // Token response exists, now check if it's authenticated (not expired by more than 5 min buffer)
+    // oauthManager.isAuthenticated() will internally use the tokenResponse again, which is fine.
+    const isAuthenticated = await oauthManager.isAuthenticated(); 
+
     if (!isAuthenticated) {
+      // Token exists but is expired/invalid. THIS is when we attempt refresh.
       console.log("Periodic check: User not authenticated or id_token expired/nearing expiry. Attempting to refresh id_token...");
       try {
-        const newIdToken = await oauthManager.getIdToken(); // This will trigger login/refresh flow
+        const newIdToken = await oauthManager.getIdToken(); // This will try backend refresh, then interactive
         if (newIdToken) {
           console.log("Periodic check: id_token refreshed successfully.");
-          // We have a new id_token. We MUST get a new wsToken and reconnect WebSocket.
-          // Close existing socket if any, as it might be using an old wsToken.
           if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
             console.log("Periodic check: Closing existing WebSocket to reconnect with new token.");
-            intentionalDisconnect = true; // To prevent handleReconnection from auto-reconnecting immediately
+            intentionalDisconnect = true; 
             socket.close(1000, "Reconnecting after id_token refresh");
-            socket = null; // Ensure it's null so connectWebSocket proceeds
+            socket = null; 
           }
           console.log("Periodic check: Ensuring WebSocket is connected with new token.");
-          connectWebSocket(); // This will now use the new id_token
+          connectWebSocket(); 
         } else {
           console.warn("Periodic check: id_token refresh attempt did not yield a new token. Auth may be lost.");
           if (socket && socket.readyState === WebSocket.OPEN) {
@@ -66,18 +83,16 @@ setInterval(async () => {
         }
       }
     } else {
-      // Authenticated with a valid id_token (not nearing expiry by more than 5 min)
+      // Authenticated and id_token is fine. Check WebSocket itself.
       if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
-        // wsToken might have expired, or network issue, etc. id_token is fine.
         console.warn("Periodic check: WebSocket disconnected (while id_token is valid), attempting to reconnect...");
-        connectWebSocket(); // This will fetch a new wsToken using the current valid id_token
+        connectWebSocket(); 
       }
-      // If socket is OPEN, and id_token is valid, do nothing (ping will keep it alive or detect issues)
     }
-  } catch (authErr: any) { // Error from oauthManager.isAuthenticated() itself
-    console.error("Error checking authentication status in periodic WS check:", authErr.message);
+  } catch (authErr: any) { // Error from oauthManager.getTokenResponse() or .isAuthenticated() itself
+    console.error("Error in periodic WS check (outer try-catch):", authErr.message);
   }
-}, 60000);
+}, 60000); // Keep interval
 
 function authenticateWithGoogle(forceAuth: boolean = false): void {
   const now = Date.now();
@@ -338,7 +353,7 @@ function showChromeNotification(
   const notificationId = "verification_" + Date.now()
   chrome.notifications.create(notificationId, {
     type: "basic",
-    iconUrl: "images/icon48.png",
+    iconUrl: "/icons/icon48.png",
     title: title,
     message: message,
     priority: 2,

@@ -43,27 +43,89 @@ class OAuthManager {
       }
 
       // console.log("Getting ID token...");
-      const tokenResponse = await this.getTokenResponse();
+      let tokenResponse = await this.getTokenResponse();
 
-      if (!tokenResponse || !tokenResponse.id_token) { // Also check if id_token exists
-        // console.log("No stored token or id_token, initiating login flow...");
+      if (!tokenResponse || !tokenResponse.id_token || this.isTokenExpired(tokenResponse)) {
+        console.log("[OAuthManager] No valid local id_token. Attempting backend refresh first.");
         this.authInProgress = true;
-        this.authPromise = this.loginWithLock(); // loginWithLock now returns id_token
-        return this.authPromise; 
-      } else if (this.isTokenExpired(tokenResponse)) {
-        // console.log("Stored token expired, initiating new login flow...");
-        this.authInProgress = true;
+
+        // Attempt backend refresh if we have an id_token (even if expired) to identify the user
+        if (tokenResponse && tokenResponse.id_token) {
+          try {
+            const backendRefreshResponse = await fetch(`${config.BACKEND_URL}/auth/refresh-google-tokens`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${tokenResponse.id_token}`,
+                'Content-Type': 'application/json',
+              },
+            });
+
+            if (backendRefreshResponse.ok) {
+              const newTokens = await backendRefreshResponse.json();
+              if (newTokens.id_token && typeof newTokens.id_token === 'string' && newTokens.new_id_token_expiry_timestamp) {
+                console.log("[OAuthManager] Successfully refreshed id_token via backend.");
+                // Construct a new tokenResponse structure for local storage
+                const refreshedTokenResponse: TokenResponse = {
+                  id_token: newTokens.id_token,
+                  expiryTimestamp: newTokens.new_id_token_expiry_timestamp * 1000, // Convert sec to ms
+                  access_token: "managed_by_backend", // Placeholder
+                  email: (this.decodeEmailFromIdToken(newTokens.id_token) ?? tokenResponse?.email) ?? "",
+                  expires_in: Math.max(0, Math.floor((newTokens.new_id_token_expiry_timestamp * 1000 - Date.now()) / 1000)),
+                  scope: (tokenResponse?.scope ?? this.decodeScopeFromIdToken(newTokens.id_token)) ?? OAuthManager.SCOPES.join(" "),
+                  token_type: "Bearer",
+                };
+                await this.storage.set("tokenResponse", refreshedTokenResponse);
+                this.authInProgress = false;
+                return newTokens.id_token;
+              } else {
+                console.warn("[OAuthManager] Backend refresh responded OK but did not return new id_token string or expiry.");
+              }
+            } else {
+              const errorData = await backendRefreshResponse.json().catch(() => ({ message: "Unknown error during backend refresh"}));
+              console.warn(`[OAuthManager] Backend refresh failed (status: ${backendRefreshResponse.status}): ${errorData.message}. Falling back to interactive login.`);
+              // Specific error handling if needed, e.g., if (errorData.error === 'refresh_token_not_found') { ... }
+            }
+          } catch (fetchError: any) {
+            console.error("[OAuthManager] Error calling backend refresh endpoint:", fetchError.message, ". Falling back to interactive login.");
+          }
+        } else {
+          console.log("[OAuthManager] No local id_token at all to attempt backend refresh. Proceeding to interactive login.");
+        }
+        
+        // If backend refresh was not attempted, failed, or didn't yield a token, fall back to interactive login
+        console.log("[OAuthManager] Falling back to interactive login flow (launchWebAuthFlow).");
         this.authPromise = this.loginWithLock(); // loginWithLock now returns id_token
         return this.authPromise;
-      }
+      } 
       // console.log("Using existing valid id_token.");
       // Return the valid id_token
-      return tokenResponse.id_token; 
+      return tokenResponse.id_token;
     } catch (error) {
       console.error("Error in getIdToken:", error);
       this.authInProgress = false;
       this.authPromise = null;
       throw error;
+    }
+  }
+
+  // Helper to decode email from id_token (basic, no full validation here)
+  private decodeEmailFromIdToken(idToken: string): string | null {
+    try {
+      const payload = idToken.split(".")[1];
+      const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+      return decoded.email || null;
+    } catch (e) {
+      return null;
+    }
+  }
+   // Helper to decode scope from id_token (basic, no full validation here)
+  private decodeScopeFromIdToken(idToken: string): string | null {
+    try {
+      const payload = idToken.split(".")[1];
+      const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+      return decoded.scope || null;
+    } catch (e) {
+      return null;
     }
   }
 

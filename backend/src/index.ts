@@ -10,7 +10,8 @@ import {
   exchangeCodeForTokens,
   verifyAndDecodeIdToken,
   revokeGoogleToken,
-  generateWebSocketToken
+  generateWebSocketToken,
+  processAndStoreRefreshedGoogleTokens
 } from './services/authService';
 import { setupGmailWatch, handleGmailPushNotification, stopGmailWatch, listGmailLabels, setupGmailOtpAutomation } from './services/gmailService';
 import { parsePubSubMessage } from './services/pubsubService';
@@ -478,6 +479,70 @@ router.post('/pubsub', async (request: Request, env: Env, ctx: ExecutionContext)
     console.error('Error handling Pub/Sub notification:', error);
     // Return 500 to indicate failure to Pub/Sub, causing potential retries
     return new Response(`Error handling Pub/Sub notification: ${error.message}`, { status: 500 });
+  }
+});
+
+// Route: Refresh Google tokens using a stored refresh_token
+router.post('/auth/refresh-google-tokens', async (request: Request, env: Env): Promise<Response> => {
+  try {
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response(JSON.stringify({ error: 'unauthorized', message: 'Missing or invalid Authorization header.' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+    const currentIdToken = authHeader.substring(7); // Extract token after 'Bearer '
+
+    let userIdFromToken: string;
+    try {
+      // We decode the ID token primarily to get the userId (sub).
+      // It's okay if it's expired for this specific purpose, as we're about to refresh it.
+      // However, verifyAndDecodeIdToken might throw if it's badly malformed or fails basic checks other than expiry.
+      const idTokenPayload = await verifyAndDecodeIdToken(currentIdToken, env.GOOGLE_CLIENT_ID);
+      userIdFromToken = idTokenPayload.sub;
+    } catch (error: any) {
+      // If token is too invalid to even get sub, then we can't proceed.
+      console.warn(`[Refresh Route] Error decoding provided ID token: ${error.message}. Cannot determine user.`);
+      return new Response(JSON.stringify({ error: 'invalid_token', message: `Provided ID token is invalid: ${error.message}` }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    console.log(`[Refresh Route] Attempting token refresh for user: ${userIdFromToken}`);
+    const tokenStoreStub = getTokenStoreDOStub(env);
+
+    // 1. Get the stored refresh_token for the user
+    const storedRefreshToken = await tokenStoreStub.getRefreshToken(userIdFromToken);
+    if (!storedRefreshToken) {
+      console.warn(`[Refresh Route: ${userIdFromToken}] No refresh token found in TokenStoreDO. Full re-authentication required.`);
+      // It's important to let the client know a full auth is needed.
+      return new Response(JSON.stringify({ error: 'refresh_token_not_found', message: 'No refresh token available. Please log in again.' }), { status: 403, headers: { 'Content-Type': 'application/json' } }); // 403 Forbidden, as re-auth is needed
+    }
+
+    // 2. Call the service to refresh tokens with Google and update TokenStoreDO
+    const refreshResult = await processAndStoreRefreshedGoogleTokens(
+      tokenStoreStub,
+      userIdFromToken,
+      storedRefreshToken,
+      env.GOOGLE_CLIENT_ID,
+      env.GOOGLE_CLIENT_SECRET
+    );
+
+    if (!refreshResult || !refreshResult.newIdToken) {
+      console.warn(`[Refresh Route: ${userIdFromToken}] Token refresh process failed or no new ID token was returned. Full re-authentication may be required.`);
+      // This could happen if the refresh_token was revoked at Google (invalid_grant)
+      // processAndStoreRefreshedGoogleTokens handles deleting user from DO in that case.
+      return new Response(JSON.stringify({ error: 'refresh_failed', message: 'Failed to refresh tokens. Please log in again.' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    // 3. Success: return the new ID token and its expiry to the extension
+    console.log(`[Refresh Route: ${userIdFromToken}] Successfully refreshed ID token.`);
+    return new Response(JSON.stringify({
+      id_token: refreshResult.newIdToken,
+      // The extension will typically decode the id_token to get its actual 'exp' claim.
+      // Sending it here is mostly for confirmation or if the extension needs it directly.
+      new_id_token_expiry_timestamp: refreshResult.newIdToken ? (await verifyAndDecodeIdToken(refreshResult.newIdToken, env.GOOGLE_CLIENT_ID)).exp : null
+    }), { headers: { 'Content-Type': 'application/json' } });
+
+  } catch (error: any) {
+    console.error('[Refresh Route] Unexpected error:', error);
+    return new Response(JSON.stringify({ error: 'server_error', message: 'An unexpected error occurred during token refresh.' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
   }
 });
 

@@ -3,6 +3,15 @@ import * as jose from 'jose';
 
 // Assuming GoogleTokenResponse and GoogleIdTokenPayload types are available globally (e.g., from types.d.ts)
 
+// Define a more specific type for Google's refresh token response
+interface GoogleRefreshTokenResponse {
+  access_token: string;
+  expires_in: number; // Duration in seconds
+  scope?: string;
+  token_type?: string;
+  id_token?: string; // id_token is often returned on refresh token grant
+}
+
 /**
  * Encrypt a token using AES encryption
  */
@@ -119,7 +128,7 @@ export async function refreshAccessToken(
   refreshToken: string,
   clientId: string,
   clientSecret: string
-): Promise<{ access_token: string; expires_in: number }> {
+): Promise<GoogleRefreshTokenResponse> {
   const params = new URLSearchParams({
     refresh_token: refreshToken,
     client_id: clientId,
@@ -262,5 +271,61 @@ export async function revokeGoogleToken(token: string): Promise<void> {
   } catch (error: any) {
     console.error(`[AuthService] Error during token revocation: ${error.message}`);
     throw error;
+  }
+}
+
+// NEW FUNCTION to handle the refresh logic, interacting with TokenStoreDO
+export async function processAndStoreRefreshedGoogleTokens(
+  tokenStoreStub: any, // Using 'any' for now, replace with actual TokenStoreDO stub type if available
+  userId: string,
+  refreshTokenFromStore: string,
+  clientId: string,
+  clientSecret: string
+): Promise<{ newIdToken?: string; newAccessToken: string; newExpiryTimestamp: number } | null> {
+  try {
+    console.log(`[AuthService: ${userId}] Attempting to refresh Google tokens using refresh_token.`);
+    const refreshedTokenData = await refreshAccessToken(
+      refreshTokenFromStore,
+      clientId,
+      clientSecret
+    );
+
+    const newAccessToken = refreshedTokenData.access_token;
+    const expiresIn = refreshedTokenData.expires_in;
+    const newIdToken = refreshedTokenData.id_token; // This might be undefined
+    const newExpiryTimestamp = Math.floor(Date.now() / 1000) + expiresIn;
+
+    console.log(`[AuthService: ${userId}] Google tokens refreshed. New access_token obtained. New id_token ${newIdToken ? 'obtained' : 'not obtained'}.`);
+
+    // Update tokens in TokenStoreDO
+    // The TokenStoreDO needs a method like 'updateRefreshedTokens'
+    // For now, assuming it takes new access token, its expiry, and potentially new id_token
+    await tokenStoreStub.updateTokensAfterRefresh(
+      userId,
+      newAccessToken,
+      newExpiryTimestamp,
+      newIdToken // Pass newIdToken if available, TokenStoreDO should handle it
+    );
+    console.log(`[AuthService: ${userId}] Successfully updated tokens in TokenStoreDO after refresh.`);
+
+    return {
+      newIdToken: newIdToken, // Will be undefined if not returned by Google
+      newAccessToken: newAccessToken, // For backend use
+      newExpiryTimestamp: newExpiryTimestamp // For backend use
+    };
+
+  } catch (error: any) {
+    console.error(`[AuthService: ${userId}] Failed to process and store refreshed Google tokens: ${error.message}`);
+    // Potentially handle specific errors, e.g., 'invalid_grant' for an expired/revoked refresh token
+    if (error.message && (error.message.includes('invalid_grant') || error.message.includes('Token has been expired or revoked'))) {
+      console.warn(`[AuthService: ${userId}] Refresh token is invalid. Full re-authentication required. Deleting user tokens.`);
+      try {
+        await tokenStoreStub.deleteUser(userId); // Clear out stale data
+      } catch (deleteError: any) {
+        console.error(`[AuthService: ${userId}] Failed to delete user tokens after invalid_grant: ${deleteError.message}`);
+      }
+    }
+    // Do not re-throw here, allow the caller (route handler) to decide response
+    return null;
   }
 }

@@ -45,9 +45,10 @@ const Popup: React.FC = () => {
           setWatchedLabelIds(new Set(fetchedWatchedIds))
         } catch (labelError: any) {
           console.error("Error fetching label data:", labelError.message)
-          if (labelError.message?.includes('User not authenticated') || labelError.message?.includes('No token data found for user')) {
+          if (labelError.message?.includes('User not authenticated') || labelError.message?.includes('User token data not found')) {
             // This indicates backend session is invalid or tokens are gone
             setError("Session expired or logged out from another device. Please login again.")
+            setSession(false); // Immediately update session state to reflect logout
             doLocalLogout = true // Mark for local logout
           } else {
             setError(`Failed to load label preferences: ${labelError.message}`)

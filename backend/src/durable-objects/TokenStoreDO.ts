@@ -12,6 +12,7 @@ export interface TokenData {
   otpLabelId: string | null;
   otpFilterId: string | null;
   isGmailAutomationSetup: boolean;
+  encryptedIdToken?: string | null;
 }
 
 export class TokenStoreDO extends DurableObject<Env> {
@@ -94,11 +95,16 @@ export class TokenStoreDO extends DurableObject<Env> {
     accessToken: string,
     refreshToken: string,
     expiryTimeSeconds: number,
-    initialWatchedLabelIds: string[] = []
+    initialWatchedLabelIds: string[] = [],
+    idToken?: string | null // Added optional idToken for initial storage
   ): Promise<void> {
     try {
       const encryptedRefreshToken = encryptToken(refreshToken, this.env.TOKEN_ENCRYPTION_KEY);
       const encryptedAccessToken = encryptToken(accessToken, this.env.TOKEN_ENCRYPTION_KEY);
+      let encryptedIdToken: string | null = null;
+      if (idToken) {
+        encryptedIdToken = encryptToken(idToken, this.env.TOKEN_ENCRYPTION_KEY);
+      }
 
       const existingTokenData = await this.ctx.storage.get<TokenData>(`user:${userId}`);
 
@@ -120,6 +126,7 @@ export class TokenStoreDO extends DurableObject<Env> {
         otpLabelId: eotpLabelId === undefined ? null : eotpLabelId,
         otpFilterId: eotpFilterId === undefined ? null : eotpFilterId,
         isGmailAutomationSetup: eisGmailAutomationSetup === undefined ? false : eisGmailAutomationSetup,
+        encryptedIdToken: existingTokenData?.encryptedIdToken === undefined ? encryptedIdToken : (encryptedIdToken ?? existingTokenData.encryptedIdToken) // Preserve if not newly provided, else use new one
       };
 
       await this.ctx.storage.put(`user:${userId}`, tokenData);
@@ -193,21 +200,41 @@ export class TokenStoreDO extends DurableObject<Env> {
       return decryptToken(tokenData.encryptedAccessToken, this.env.TOKEN_ENCRYPTION_KEY);
     }
 
+    console.log(`[TokenStoreDO: ${userId}] Access token expired or nearing expiry. Attempting refresh.`);
     try {
       // Token is expired, refresh it
-      const refreshToken = decryptToken(tokenData.encryptedRefreshToken, this.env.TOKEN_ENCRYPTION_KEY);
-      const { access_token: newRawAccessToken, expires_in } = await refreshAccessToken(refreshToken, this.env.GOOGLE_CLIENT_ID, this.env.GOOGLE_CLIENT_SECRET);
+      const rawRefreshToken = decryptToken(tokenData.encryptedRefreshToken, this.env.TOKEN_ENCRYPTION_KEY);
 
-      // Encrypt the new access token before storing
-      tokenData.encryptedAccessToken = encryptToken(newRawAccessToken, this.env.TOKEN_ENCRYPTION_KEY);
-      tokenData.expiry = now + expires_in;
+      // Call the authService's refreshAccessToken which now returns more data
+      const refreshedGoogleData = await refreshAccessToken(rawRefreshToken, this.env.GOOGLE_CLIENT_ID, this.env.GOOGLE_CLIENT_SECRET);
 
-      await this.ctx.storage.put(`user:${userId}`, tokenData);
-      console.log(`[TokenStoreDO] Refreshed access token for user ${userId}`);
+      const newRawAccessToken = refreshedGoogleData.access_token;
+      const expiresIn = refreshedGoogleData.expires_in;
+      const newRawIdToken = refreshedGoogleData.id_token; // This might be undefined
+      const newExpiryTimestamp = Math.floor(Date.now() / 1000) + expiresIn;
 
-      return newRawAccessToken;
+      // Use the new method to update all tokens
+      await this.updateTokensAfterRefresh(
+        userId,
+        newRawAccessToken,
+        newExpiryTimestamp,
+        newRawIdToken // Pass it through
+      );
+
+      console.log(`[TokenStoreDO] Refreshed tokens for user ${userId} via getValidAccessToken flow.`);
+
+      return newRawAccessToken; // Return the new access token
     } catch (error: any) {
-      console.error(`[TokenStoreDO] Error refreshing token for ${userId}: ${error.message}`);
+      console.error(`[TokenStoreDO] Error refreshing token for ${userId} within getValidAccessToken: ${error.message}`);
+      // If refresh fails (e.g. invalid_grant), we might want to delete the user's tokens
+      if (error.message && (error.message.includes('invalid_grant') || error.message.includes('Token has been expired or revoked'))) {
+        console.warn(`[TokenStoreDO: ${userId}] Refresh token is invalid during getValidAccessToken. Deleting user tokens.`);
+        try {
+          await this.deleteUser(userId); // Clear out stale data
+        } catch (deleteError: any) {
+          console.error(`[TokenStoreDO: ${userId}] Failed to delete user tokens after invalid_grant in getValidAccessToken: ${deleteError.message}`);
+        }
+      }
       throw new Error(`Failed to refresh token: ${error.message}`);
     }
   }
@@ -284,6 +311,54 @@ export class TokenStoreDO extends DurableObject<Env> {
       console.log(`[TokenStoreDO] Marked Gmail automation setup as ${setupState} for user ${userId}`);
     } catch (error: any) {
       console.error(`[TokenStoreDO] Error marking Gmail setup for ${userId}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  // Method to get only the decrypted refresh token
+  async getRefreshToken(userId: string): Promise<string | null> {
+    try {
+      const tokenData = await this.getTokenByUserId(userId);
+      if (tokenData && tokenData.encryptedRefreshToken) {
+        return decryptToken(tokenData.encryptedRefreshToken, this.env.TOKEN_ENCRYPTION_KEY);
+      }
+      return null;
+    } catch (error: any) {
+      console.error(`[TokenStoreDO] Error getting refresh token for ${userId}: ${error.message}`);
+      return null;
+    }
+  }
+
+  // Update tokens after a successful refresh token grant from Google
+  async updateTokensAfterRefresh(
+    userId: string,
+    newRawAccessToken: string,
+    newExpiryTimestamp: number,
+    newRawIdToken?: string | null // newRawIdToken can be string, null, or undefined
+  ): Promise<void> {
+    try {
+      const tokenData = await this.getTokenByUserId(userId);
+      if (!tokenData) {
+        throw new Error(`No token data found for user ${userId} to update after refresh.`);
+      }
+
+      tokenData.encryptedAccessToken = encryptToken(newRawAccessToken, this.env.TOKEN_ENCRYPTION_KEY);
+      tokenData.expiry = newExpiryTimestamp;
+
+      if (newRawIdToken) {
+        tokenData.encryptedIdToken = encryptToken(newRawIdToken, this.env.TOKEN_ENCRYPTION_KEY);
+        console.log(`[TokenStoreDO: ${userId}] Updated with new encryptedIdToken.`);
+      } else if (newRawIdToken === null) {
+        // Explicitly clear if null is passed (Google didn't return one, or it should be cleared)
+        tokenData.encryptedIdToken = null;
+        console.log(`[TokenStoreDO: ${userId}] Cleared encryptedIdToken as new one was null.`);
+      }
+      // If newRawIdToken is undefined, we don't change the existing encryptedIdToken
+
+      await this.ctx.storage.put(`user:${userId}`, tokenData);
+      console.log(`[TokenStoreDO: ${userId}] Access token and expiry (and potentially ID token) updated after Google refresh grant.`);
+    } catch (error: any) {
+      console.error(`[TokenStoreDO: ${userId}] Error in updateTokensAfterRefresh: ${error.message}`);
       throw error;
     }
   }
