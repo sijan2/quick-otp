@@ -215,12 +215,19 @@ function getWebSocketHubDOStub(namespace: DurableObjectNamespace, userId: string
 }
 
 // Define types for parameters that would be passed from the worker environment
-export interface GmailHandlerConfig { // Added export
+export interface GmailHandlerConfig {
   tokenStoreDONamespace: DurableObjectNamespace;
   webSocketHubDONamespace: DurableObjectNamespace;
-  openAIApiKey: string;
+  // AI Configuration
+  provider: 'openai' | 'gemini';
+  // OpenAI specific config
+  openAIApiKey?: string;
   openAIModelName?: string;
   openAIEndpoint?: string;
+  // Gemini specific config
+  geminiApiKey?: string;
+  geminiModelName?: string;
+  geminiEndpoint?: string;
 }
 
 export interface GmailNotificationPayload { // Added export (might be needed by caller)
@@ -238,7 +245,17 @@ export async function handleGmailPushNotification(
 ): Promise<void> {
   console.log(`[GmailHandler: ${notification.emailAddress}] Received push notification, historyId: ${notification.historyId}`);
 
-  const { tokenStoreDONamespace, webSocketHubDONamespace, openAIApiKey, openAIModelName, openAIEndpoint } = config;
+  const {
+    tokenStoreDONamespace,
+    webSocketHubDONamespace,
+    provider,
+    openAIApiKey,
+    openAIModelName,
+    openAIEndpoint,
+    geminiApiKey,
+    geminiModelName,
+    geminiEndpoint
+  } = config;
   const { emailAddress, historyId: newHistoryIdFromNotification } = notification;
 
   const tokenStoreStub = getTokenStoreDOStub(tokenStoreDONamespace);
@@ -348,9 +365,17 @@ export async function handleGmailPushNotification(
         }
 
         const aiConfig: AIProcessingConfig = {
-          openAIApiKey: openAIApiKey,
-          ...(openAIModelName && { openAIModelName }),
-          ...(openAIEndpoint && { openAIEndpoint }),
+          provider,
+          ...(provider === 'openai' && {
+            openAIApiKey,
+            ...(openAIModelName && { openAIModelName }),
+            ...(openAIEndpoint && { openAIEndpoint }),
+          }),
+          ...(provider === 'gemini' && {
+            geminiApiKey,
+            ...(geminiModelName && { geminiModelName }),
+            ...(geminiEndpoint && { geminiEndpoint }),
+          }),
         };
         const processedData: AIProcessedEmail = await processEmailWithAI(emailContent, aiConfig);
         console.log(`[GmailHandler: ${userId}] AI processing complete for ${messageInfo.id}. OTP found: ${!!processedData.code}, URL found: ${!!processedData.url}.`);
@@ -548,7 +573,9 @@ function getOtpFilterQuery(): string {
         "recover your account password request",
         "recover your account password request link",
         "recover your account password request instructions",
-
+        "park your account",
+        "park my account",
+        "forgotten your password"
     ];
     const uniquePhrases = [...new Set(phrases.map(p => p.toLowerCase().trim()))];
     return uniquePhrases.map(phrase => `"${phrase}"`).join(' OR ');

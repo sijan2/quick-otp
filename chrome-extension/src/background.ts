@@ -28,23 +28,55 @@ let wsToken: string | null = null
 let tokenExpiry: number = 0
 
 // Periodically check WebSocket connection (keep)
-setInterval(() => {
-  oauthManager.isAuthenticated().then(isAuthenticated => {
+setInterval(async () => {
+  try {
+    const isAuthenticated = await oauthManager.isAuthenticated();
     if (!isAuthenticated) {
-      console.log("Periodic check: User not authenticated, skipping WebSocket connection attempt.");
-      return;
+      console.log("Periodic check: User not authenticated or id_token expired/nearing expiry. Attempting to refresh id_token...");
+      try {
+        const newIdToken = await oauthManager.getIdToken(); // This will trigger login/refresh flow
+        if (newIdToken) {
+          console.log("Periodic check: id_token refreshed successfully.");
+          // We have a new id_token. We MUST get a new wsToken and reconnect WebSocket.
+          // Close existing socket if any, as it might be using an old wsToken.
+          if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+            console.log("Periodic check: Closing existing WebSocket to reconnect with new token.");
+            intentionalDisconnect = true; // To prevent handleReconnection from auto-reconnecting immediately
+            socket.close(1000, "Reconnecting after id_token refresh");
+            socket = null; // Ensure it's null so connectWebSocket proceeds
+          }
+          console.log("Periodic check: Ensuring WebSocket is connected with new token.");
+          connectWebSocket(); // This will now use the new id_token
+        } else {
+          console.warn("Periodic check: id_token refresh attempt did not yield a new token. Auth may be lost.");
+          if (socket && socket.readyState === WebSocket.OPEN) {
+             console.warn("Periodic check: Closing WebSocket as authentication refresh failed.");
+             intentionalDisconnect = true;
+             socket.close(1008, "Authentication token expired and refresh failed");
+             socket = null;
+          }
+        }
+      } catch (refreshError: any) {
+        console.error("Periodic check: Error during id_token refresh:", refreshError.message);
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            console.warn("Periodic check: Closing WebSocket due to error in authentication refresh.");
+            intentionalDisconnect = true;
+            socket.close(1008, "Authentication token refresh error");
+            socket = null;
+        }
+      }
+    } else {
+      // Authenticated with a valid id_token (not nearing expiry by more than 5 min)
+      if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+        // wsToken might have expired, or network issue, etc. id_token is fine.
+        console.warn("Periodic check: WebSocket disconnected (while id_token is valid), attempting to reconnect...");
+        connectWebSocket(); // This will fetch a new wsToken using the current valid id_token
+      }
+      // If socket is OPEN, and id_token is valid, do nothing (ping will keep it alive or detect issues)
     }
-    // If authenticated, check WebSocket state directly.
-    // connectWebSocket() will handle its own token acquisition.
-    if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
-      console.warn("Periodic check: WebSocket disconnected, attempting to reconnect...");
-      connectWebSocket();
-    }
-    // If socket is OPEN or CONNECTING, this periodic check does nothing further.
-  }).catch(authErr => {
-    // This catch is for errors from oauthManager.isAuthenticated()
-    console.error("Error checking authentication status in periodic WS check:", authErr);
-  });
+  } catch (authErr: any) { // Error from oauthManager.isAuthenticated() itself
+    console.error("Error checking authentication status in periodic WS check:", authErr.message);
+  }
 }, 60000);
 
 function authenticateWithGoogle(forceAuth: boolean = false): void {

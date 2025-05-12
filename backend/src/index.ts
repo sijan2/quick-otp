@@ -445,9 +445,19 @@ router.post('/pubsub', async (request: Request, env: Env, ctx: ExecutionContext)
     const gmailConfig: import('./services/gmailService').GmailHandlerConfig = {
         tokenStoreDONamespace: env.TOKEN_STORE_DO,
         webSocketHubDONamespace: env.WEBSOCKET_HUB,
-        openAIApiKey: env.OPENAI_API_KEY,
-        openAIModelName: env.OPENAI_MODEL_NAME,
-        openAIEndpoint: env.OPENAI_ENDPOINT,
+        provider: env.AI_PROVIDER,
+        // OpenAI specific config
+        ...(env.AI_PROVIDER === 'openai' && {
+            openAIApiKey: env.OPENAI_API_KEY,
+            openAIModelName: env.OPENAI_MODEL_NAME,
+            openAIEndpoint: env.OPENAI_ENDPOINT,
+        }),
+        // Gemini specific config
+        ...(env.AI_PROVIDER === 'gemini' && {
+            geminiApiKey: env.GOOGLE_API_KEY,
+            geminiModelName: env.GEMINI_MODEL_NAME,
+            geminiEndpoint: env.GEMINI_ENDPOINT,
+        }),
     };
 
     // Call the consolidated handler from gmailService.ts

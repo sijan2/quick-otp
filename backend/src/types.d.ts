@@ -17,9 +17,15 @@ interface Env {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   TOKEN_ENCRYPTION_KEY: string;
-  OPENAI_API_KEY: string; // Added OpenAI API Key Secret
-  OPENAI_MODEL_NAME?: string; // Optional: Model name override
-  OPENAI_ENDPOINT?: string; // Optional: Endpoint override (e.g. for Azure OpenAI)
+
+  // AI Configuration
+  AI_PROVIDER: 'openai' | 'gemini';  // Which AI provider to use
+  OPENAI_API_KEY?: string;           // OpenAI API Key (if using OpenAI)
+  OPENAI_MODEL_NAME?: string;        // Optional: OpenAI model name override
+  OPENAI_ENDPOINT?: string;          // Optional: OpenAI endpoint override
+  GOOGLE_API_KEY?: string;           // Gemini API Key (if using Gemini)
+  GEMINI_MODEL_NAME?: string;        // Optional: Gemini model name override
+  GEMINI_ENDPOINT?: string;          // Optional: Gemini endpoint override
 }
 
 interface TokenData {
