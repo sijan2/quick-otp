@@ -156,7 +156,11 @@ export async function refreshAccessToken(
 /**
  * Decode and verify an ID token from Google
  */
-export async function verifyAndDecodeIdToken(idToken: string, clientId: string): Promise<GoogleIdTokenPayload> {
+export async function verifyAndDecodeIdToken(
+  idToken: string,
+  clientId: string,
+  ignoreExpiry: boolean = false // New parameter
+): Promise<GoogleIdTokenPayload> {
   try {
     // For production, you should use a proper JWT verification library with all checks
     // This is a simplified version for demonstration
@@ -165,7 +169,7 @@ export async function verifyAndDecodeIdToken(idToken: string, clientId: string):
     // Basic verification
     const now = Math.floor(Date.now() / 1000);
 
-    if (decodedToken.exp && decodedToken.exp < now) {
+    if (!ignoreExpiry && decodedToken.exp && decodedToken.exp < now) { // Check ignoreExpiry flag
       throw new Error('Token expired');
     }
 

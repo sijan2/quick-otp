@@ -494,14 +494,13 @@ router.post('/auth/refresh-google-tokens', async (request: Request, env: Env): P
     let userIdFromToken: string;
     try {
       // We decode the ID token primarily to get the userId (sub).
-      // It's okay if it's expired for this specific purpose, as we're about to refresh it.
-      // However, verifyAndDecodeIdToken might throw if it's badly malformed or fails basic checks other than expiry.
-      const idTokenPayload = await verifyAndDecodeIdToken(currentIdToken, env.GOOGLE_CLIENT_ID);
+      // Pass true for ignoreExpiry for this specific refresh purpose.
+      const idTokenPayload = await verifyAndDecodeIdToken(currentIdToken, env.GOOGLE_CLIENT_ID, true);
       userIdFromToken = idTokenPayload.sub;
     } catch (error: any) {
-      // If token is too invalid to even get sub, then we can't proceed.
-      console.warn(`[Refresh Route] Error decoding provided ID token: ${error.message}. Cannot determine user.`);
-      return new Response(JSON.stringify({ error: 'invalid_token', message: `Provided ID token is invalid: ${error.message}` }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+      // If token is too invalid to even get sub (e.g. aud/iss mismatch, malformed), then we can't proceed.
+      console.warn(`[Refresh Route] Error validating provided ID token (even with expiry ignored): ${error.message}. Cannot determine user.`);
+      return new Response(JSON.stringify({ error: 'invalid_token_structure', message: `Provided ID token is invalid or malformed: ${error.message}` }), { status: 401, headers: { 'Content-Type': 'application/json' } });
     }
 
     console.log(`[Refresh Route] Attempting token refresh for user: ${userIdFromToken}`);

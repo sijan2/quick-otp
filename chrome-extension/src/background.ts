@@ -584,12 +584,21 @@ async function initializeConnectionOnStartup() {
     const isAuthenticated = await oauthManager.isAuthenticated();
     if (isAuthenticated) {
       console.log("[Startup] User is already authenticated. Initiating WebSocket connection...");
-      connectWebSocket();
+      connectWebSocket(); // Connect WebSocket if already authenticated
     } else {
-      console.log("[Startup] User is not authenticated. Waiting for login.");
+      console.log("[Startup] User is not authenticated. Attempting to refresh session immediately...");
+      // Attempt to get/refresh the ID token.
+      // getIdToken will try backend refresh first, then interactive if necessary.
+      const newIdToken = await oauthManager.getIdToken();
+      if (newIdToken) {
+        console.log("[Startup] Session refreshed successfully. Initiating WebSocket connection...");
+        connectWebSocket(); // Connect WebSocket after successful refresh
+      } else {
+        console.log("[Startup] Session could not be refreshed automatically. Waiting for manual login or periodic check.");
+      }
     }
-  } catch (error) {
-    console.error("[Startup] Error checking initial authentication state:", error);
+  } catch (error: any) { 
+    console.error("[Startup] Error during initial authentication/refresh attempt:", error.message);
   }
 }
 

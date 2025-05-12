@@ -134,24 +134,41 @@ Before attempting to extract any data, you MUST first classify the email's inten
     * Distinguish from order numbers, support IDs, or generic numbers in the email. The context must be user verification.
 
 2.  **Verification URLs**:
-    * **Sanity filter for candidate URLs:**
+    * **Identifying Candidate URLs:** First, identify potential verification links. Look for explicitly labeled links like "confirmation link", "verification link", "reset link", "activate account link", "verify your email", "confirm your account". Also, consider links whose surrounding text or HTML properties (e.g., button text like "Sign In", "Verify Account", "Complete Registration") strongly suggest they are for immediate verification or action completion.
+
+    * **HTML Link Processing and Decoding (Crucial Pre-step):**
+        * When URLs are sourced from HTML content (e.g., \`href\` attributes in \`<a>\` tags, or URLs in \`form\` actions if relevant):
+            1.  HTML entities (e.g., \`&amp;\` to \`&\`, \`&#x3D;\` to \`=\`) MUST be fully decoded.
+            2.  \`Quoted-printable\` encodings (e.g., \`=3D\` to \`=\`, \`=20\` to space, soft line break \`=\` at the end of a line followed by a newline removed) commonly found in email bodies or \`href\` attributes MUST be fully decoded.
+        * The resulting raw, fully decoded URL string is what all subsequent filters and checks MUST operate on. Failure to properly decode may lead to incorrect rejection of valid URLs.
+
+    * **URL Source and Priority:**
+        * If an email contains both plain text and HTML versions, prioritize parsing URLs from the HTML part, especially from \`<a>\` tags, as these are more likely to be correctly formatted and intended by the sender for user interaction.
+        * If multiple potentially actionable URLs are found (e.g., one in plain text, one in HTML, or multiple in HTML), evaluate each *fully decoded* URL against the sanity filters below.
+        * A correctly formed and validated URL from HTML that is clearly tied to the verification action should be preferred over a malformed URL or a less specific URL from plain text. If both a plain text and an HTML URL seem viable but one is malformed (e.g., missing \`=\` in parameters), the well-formed one should be chosen.
+
+    * **Sanity filter for candidate URLs (applied to the *fully decoded* URL):**
         * **General Parameter Structure:**
             * Each query parameter MUST strictly follow the \`name=value\` format.
-            * If a common parameter name (like 'email', 'token', 'code', 'callbackUrl', 'redirect_uri') is identified but is NOT immediately followed by an equals sign (\`=\`) and then a value, the URL is malformed and MUST be rejected (output \`null\` for the url). For example, \`?emailjohn@example.com\` or \`&token123\` are invalid. It must be \`?email=john@example.com\` or \`&token=123\`.
-            * A URL must contain at least one valid \`name=value\` pair in its query string to be considered.
+            * If a common parameter name (like 'email', 'token', 'code', 'callbackUrl', 'redirect_uri') is identified but is NOT immediately followed by an equals sign (\`=\`) and then a value, the URL is malformed for that parameter and MUST be rejected (output \`null\` for the url). For example, \`?emailjohn@example.com\` or \`&token123\` are invalid. It must be \`?email=john@example.com\` or \`&token=123\`.
+            * A URL must contain at least one valid \`name=value\` pair in its query string to be considered generally, unless its path structure is highly indicative of verification (e.g. \`/verify/TOKEN_VALUE\`).
             * If a parameter name is present but has no value (e.g., \`?param1=&param2=foo\`), this specific parameter might be ignorable. However, if critical parameters (like 'email', 'token' for specific services) are missing their values, the link should be rejected.
         * **Perplexity Links Specifically:**
-            * Must adhere to the general parameter structure.
-            * Specifically, require the actual parameter and value pairs: \`callbackUrl=...\`, \`token=...\`, \`email=...\`.
-            * If you see patterns like \`callbackUrlhttps...\`, (missing \`=\` after \`callbackUrl\`) or \`tokenxyz...\`, (missing \`=\` after \`token\`) or \`emailsomeone@example.com\`, (missing \`=\` after \`email\`), this URL is malformed for Perplexity and MUST be rejected.
+            * Must adhere to the general parameter structure *after all HTML/quoted-printable decoding*.
+            * Specifically, require the actual parameter and value pairs: \`callbackUrl=...\`, \`token=...\`, \`email=...\` *in the fully decoded URL*.
+            * If, *in the fully decoded URL*, you observe patterns like \`callbackUrlhttps...\`, (i.e., \`callbackUrl\` is not followed by \`=value\`), or \`tokenxyz...\`, (i.e., \`token\` is not followed by \`=value\`), or \`emailsomeone@example.com\`, (i.e., \`email\` is not followed by \`=value\`), this URL is malformed for Perplexity and MUST be rejected.
             * A Perplexity verification URL must have at least two valid query parameters from the expected set (\`callbackUrl\`, \`token\`, \`email\`) to be considered valid.
-        * **Google Redirect Unwrapping:** If a URL's host is \`google.com\` and it contains a \`q=\` parameter (e.g., \`https://www.google.com/url?q=REAL_URL&...\`), the actual verification URL is the value of the \`q\` parameter. Ensure this \`REAL_URL\` is properly URL-decoded if necessary. THEN, re-apply all these sanity filters to the unwrapped \`REAL_URL\`. If the unwrapped URL fails these checks, it must also be rejected.
-    * Look for explicitly labeled links: "confirmation link", "verification link", "reset link", "activate account link", "verify your email", "confirm your account".
-    * The URL's purpose should be to directly verify an email, complete a sign-up, or reset a password.
-    * Avoid extracting links to general settings pages, help articles, or the main website unless the surrounding text explicitly states this link is THE verification step. For example, a link to a security settings page in a "new login detected" email is NOT a verification URL for the login itself.
-    * After the above structural and service-specific checks, to be considered a valid verification URL, it generally should contain:
-        * At least two query parameters if it's a general verification link (unless a single parameter like a token is clearly sufficient and common for that service type).
-        * OR a path/fragment that strongly indicates verification (e.g., "reset", "verify", "activate") often followed by a token-like string.
+        * **Google Redirect Unwrapping:** If a URL's host is \`google.com\` (or similar known redirectors like \`click.example.com\` if they use a common query parameter for the real URL) and it contains a \`q=\` parameter (or other known redirect parameter like \`url=\`), the actual verification URL is the value of that \`q\` (or \`url\`) parameter. Ensure this \`REAL_URL\` is properly URL-decoded if necessary (it might have its own layer of URL encoding). THEN, re-apply all these sanity filters (including the HTML Link Processing and Decoding steps if the \`REAL_URL\` itself appears to be further encoded, though less common) to the unwrapped \`REAL_URL\`. If the unwrapped URL fails these checks, it must also be rejected.
+
+    * **Purpose and Context:**
+        * The URL's purpose, determined from link text, surrounding sentences, or button labels, should be to directly verify an email, complete a sign-up, reset a password, or log in.
+        * Avoid extracting links to general settings pages, help articles, or the main website unless the surrounding text explicitly states this link is THE verification step itself. For example, a link to a security settings page in a "new login detected" email is NOT a verification URL for the login itself.
+
+    * **Final Validation Criteria:**
+        * After the above decoding, structural, and service-specific checks, to be considered a valid verification URL, it generally should contain:
+            * At least two query parameters if it's a general verification link (unless a single parameter like a long, unique token is clearly sufficient and common for that service type, e.g., \`/verify/[TOKEN_HERE]\`).
+            * OR a path/fragment that strongly indicates verification (e.g., "/reset", "/verify", "/activate", "/confirm") often followed by a token-like string in the path or as a query parameter.
+t strongly indicates verification (e.g., "reset", "verify", "activate") often followed by a token-like string.
 
 **Output Format Instructions (Strict Adherence Required):**
 * You MUST return your response as a single, valid JSON object.
