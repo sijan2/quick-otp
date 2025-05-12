@@ -1,108 +1,96 @@
-# Quick OTP - Backend Setup Guide
+# Quick OTP - Backend Setup
 
-This backend is a Cloudflare Worker that handles Google OAuth, manages Gmail API interactions (labels, filters, push notifications via Pub/Sub), and provides a WebSocket server for real-time communication with the Quick OTP Chrome Extension.
+Cloudflare Worker backend for Google OAuth, Gmail API interaction, and WebSocket communication with the Quick OTP Chrome Extension.
 
 ## Prerequisites
 
-1.  **Node.js and pnpm:** Ensure you have Node.js (preferably LTS version) and pnpm installed.
-    *   Node.js: [https://nodejs.org/](https://nodejs.org/)
-    *   pnpm: `npm install -g pnpm`
-2.  **Cloudflare Account:** You'll need a Cloudflare account.
-3.  **Wrangler CLI:** Install or update the Wrangler CLI: `pnpm install -g wrangler` (or `npm install -g wrangler`). Then log in: `wrangler login`.
-4.  **Google Cloud Platform (GCP) Project:**
+1.  **Node.js & pnpm:** Install [Node.js (LTS)](https://nodejs.org/) and [pnpm](https://pnpm.io/installation#using-npm).
+2.  **Cloudflare Account & Wrangler CLI:**
+    *   Sign up for a [Cloudflare account](https://dash.cloudflare.com/sign-up).
+    *   Install Wrangler CLI: `pnpm install -g wrangler` (or `npm`).
+    *   Login: `wrangler login`.
+3.  **Google Cloud Platform (GCP) Project:**
     *   Create a GCP project.
-    *   Enable the **Gmail API** and the **Google Cloud Pub/Sub API**.
-    *   Create OAuth 2.0 Credentials (for a "Web application") to get a **Client ID** and **Client Secret**.
-        *   Add Authorized JavaScript origins (e.g., `https://quiet-lab-240a.your-subdomain.workers.dev` - replace with your worker URL once deployed for testing, though not strictly necessary for the backend-only flow if redirect URI is properly set for worker).
-        *   Add an Authorized redirect URI: This **must** match the `GOOGLE_REDIRECT_URI` you will set later (e.g., `https://your-worker-subdomain.workers.dev/auth/callback`).
-    *   Create a Pub/Sub Topic (e.g., `otp-notifications`). Note its full topic name (e.g., `projects/your-gcp-project-id/topics/your-topic-name`).
-    *   Create a Pub/Sub Subscription for this topic:
-        *   **Delivery type:** Push
-        *   **Endpoint URL:** This will be your deployed Worker's `/pubsub` endpoint (e.g., `https://your-worker-subdomain.workers.dev/pubsub`). You might need to deploy the worker first to get this URL, then come back and set it.
-        *   **Enable authentication:** Select "Enable authentication". For the "Audience" field, use the same URL as your push endpoint (this will be your `GOOGLE_PUBSUB_JWT_AUDIENCE`). The service account should typically be `service-{PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com`. Ensure this service account has the "Pub/Sub Subscriber" (or more broadly, "Pub/Sub Editor") role and the "Service Account Token Creator" role on your project, or at least the permission to publish to the push endpoint.
-5.  **OpenAI Account:**
-    *   Obtain an OpenAI API Key for AI email processing.
+    *   Enable **Gmail API** and **Google Cloud Pub/Sub API**.
+    *   **OAuth 2.0 Credentials (Web application):**
+        *   Note Client ID & Client Secret.
+        *   Authorized redirect URI: `https://<YOUR_WORKER_URL>/auth/callback` (update after first deploy).
+    *   **Pub/Sub Topic:**
+        *   Create a topic (e.g., `otp-notifications`). Note its full name: `projects/<GCP_PROJECT_ID>/topics/<YOUR_TOPIC_NAME>`.
+    *   **Pub/Sub Subscription (for the topic):**
+        *   Delivery type: **Push**.
+        *   Endpoint URL: `https://<YOUR_WORKER_URL>/pubsub` (update after first deploy).
+        *   Authentication: **Enable**.
+            *   Audience: Use the push endpoint URL (e.g., `https://<YOUR_WORKER_URL>/pubsub`).
+            *   Service Account: `service-{PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com`.
+            *   Ensure this service account has "Pub/Sub Subscriber" and "Service Account Token Creator" roles.
+4.  **(Optional) OpenAI Account & API Key:** For AI email processing if using OpenAI.
+5.  **(Optional) Google API Key:** If using Gemini, a Google API key is needed.
 
-## Setup Steps
+## Setup
 
-1.  **Clone the Repository:**
+1.  **Clone & Install:**
     ```bash
-    git clone git clone https://github.com/sijan2/quick-otp.git
+    git clone https://github.com/sijan2/quick-otp.git
     cd quick-otp/backend
-    ```
-
-2.  **Install Dependencies:**
-    ```bash
     pnpm install
     ```
 
-3.  **Configure Wrangler Secrets:**
-    These are essential for your application to function. Run these commands in your `backend` directory and provide the values when prompted:
+2.  **Configure Wrangler Secrets:**
+    In the `backend` directory, run `pnpm wrangler secret put <SECRET_NAME>` for each of the following and provide the values when prompted:
 
-    *   **Google OAuth Credentials (from GCP):**
+    *   **`AI_PROVIDER`**: Set to either `"openai"` or `"gemini"` to choose the AI service.
+    *   **`GOOGLE_API_KEY`**: Your Google API Key (used if `AI_PROVIDER` is `"gemini"` or for other Google services not covered by OAuth).
+    *   **`GOOGLE_CLIENT_ID`**: Your Google OAuth Client ID (from GCP).
+    *   **`GOOGLE_CLIENT_SECRET`**: Your Google OAuth Client Secret (from GCP).
+    *   **`GOOGLE_PUBSUB_JWT_AUDIENCE`**: Your Worker's Pub/Sub push endpoint URL (e.g., `https://<WORKER_NAME>.<YOUR_CF_USER>.workers.dev/pubsub`). Must match GCP Pub/Sub subscription config.
+    *   **`GOOGLE_REDIRECT_URI`**: Your Worker's OAuth callback URL (e.g., `https://<WORKER_NAME>.<YOUR_CF_USER>.workers.dev/auth/callback`). Must match GCP OAuth config.
+    *   **`OPENAI_API_KEY`**: Your OpenAI API Key (required if `AI_PROVIDER` is `"openai"`).
+    *   **`PUBSUB_TOPIC_NAME`**: Full Pub/Sub topic name from GCP (e.g., `projects/<GCP_PROJECT_ID>/topics/<YOUR_TOPIC_NAME>`).
+    *   **`TOKEN_ENCRYPTION_KEY`**: A strong random string for encrypting tokens. Generate one with:
         ```bash
-        pnpm wrangler secret put GOOGLE_CLIENT_ID
-        pnpm wrangler secret put GOOGLE_CLIENT_SECRET
-        ```
-
-    *   **Application URLs & Identifiers (replace placeholders with your actual values):**
-        ```bash
-        # Your Worker's OAuth callback (must match GCP config)
-        pnpm wrangler secret put GOOGLE_REDIRECT_URI
-        # e.g., https://your-app-name.your-cf-subdomain.workers.dev/auth/callback
-
-        # Your Worker's Pub/Sub push endpoint URL (must match GCP Pub/Sub subscription config)
-        pnpm wrangler secret put GOOGLE_PUBSUB_JWT_AUDIENCE
-        # e.g., https://your-app-name.your-cf-subdomain.workers.dev/pubsub
-
-        # Full Pub/Sub topic name (from GCP)
-        pnpm wrangler secret put PUBSUB_TOPIC_NAME
-        # e.g., projects/your-gcp-project-id/topics/your-chosen-topic-name
-        ```
-
-    *   **Token Encryption Key (generate a strong random string, e.g., 32+ characters):**
-        ```bash
-		 # Generate a 32-character random string
         openssl rand -base64 24
-        pnpm wrangler secret put TOKEN_ENCRYPTION_KEY
         ```
-
-    *   **OpenAI API Key:**
+    *   **`WEBSOCKET_JWT_SECRET`**: A strong random string for signing WebSocket JWTs. Generate one similarly:
         ```bash
-        pnpm wrangler secret put OPENAI_API_KEY
+        openssl rand -base64 24
         ```
-        *(Optional) You can also set `OPENAI_MODEL_NAME` and `OPENAI_ENDPOINT` as secrets if you want to override defaults for the AI service.*
 
-4.  **Update `wrangler.jsonc` (if necessary):
-    *   **Worker Name:** Change the `"name"` field in `wrangler.jsonc` if you want a different name for your deployed worker (e.g., from `"quiet-lab-240a"` to your preferred name). This will affect your worker's URL.
-    *   Verify `"main"` points to `"src/index.ts"`.
-    *   The `durable_objects` bindings and `migrations` should generally be kept as they define the structure of your application's stateful components.
+    *   **(Optional) OpenAI Model/Endpoint Overrides (if `AI_PROVIDER="openai"`):**
+        *   `pnpm wrangler secret put OPENAI_MODEL_NAME`
+        *   `pnpm wrangler secret put OPENAI_ENDPOINT`
 
-5.  **Deploy to Cloudflare Workers:**
+    *   **(Optional) Gemini Model/Endpoint Overrides (if `AI_PROVIDER="gemini"`):**
+        *   `pnpm wrangler secret put GEMINI_MODEL_NAME`
+        *   `pnpm wrangler secret put GEMINI_ENDPOINT`
+        *   *(Note: `GOOGLE_API_KEY` is used for Gemini authentication).*
+
+
+3.  **Configure `wrangler.jsonc`:**
+    *   Update `"name"` to your desired worker name (this affects the URL).
+    *   Ensure `"main"` is `"src/index.ts"`.
+    *   Keep `durable_objects` bindings and `migrations` as is.
+
+4.  **Deploy:**
     ```bash
     pnpm wrangler deploy
     ```
-    After the first deployment, you will get your worker's URL (e.g., `https://your-app-name.your-cf-subdomain.workers.dev`). You may need to update your GCP Pub/Sub subscription's push endpoint URL and your GCP OAuth Client's Authorized Redirect URI with this URL if you didn't know it beforehand.
+    *   Note the deployed worker URL. Update GCP redirect URI and Pub/Sub push endpoint if necessary.
 
 ## Development
 
-*   To run a local development server (simulates the Cloudflare environment):
-    ```bash
-    pnpm wrangler dev
-    ```
-*   This will typically run on `http://localhost:8787`.
-*   **Note:** For local development, Pub/Sub push notifications from Google Cloud will not reach your local server unless you use a tunneling service (e.g., ngrok, cloudflared tunnel) and update your Pub/Sub subscription endpoint accordingly. OAuth might also require careful configuration of redirect URIs for localhost.
+*   Local dev server: `pnpm wrangler dev` (runs on `http://localhost:8787`).
+*   **Note:** Pub/Sub push won't reach localhost without tunneling (e.g., ngrok, cloudflared tunnel) and updated GCP subscription settings.
 
-## Project Structure Key Files
+## Key Files
 
-*   `src/index.ts`: Main entry point for the Worker, handles HTTP routing.
-*   `src/services/`: Contains business logic for Gmail, Auth, AI, Pub/Sub.
-*   `src/durable-objects/`: Definitions for Durable Objects (`TokenStoreDO`, `WebSocketHubDO`).
-*   `wrangler.jsonc`: Configuration file for Wrangler and Cloudflare Worker deployment.
-*   `package.json`: Project dependencies and scripts.
+*   `src/index.ts`: Main router & entry point.
+*   `src/services/`: Business logic (Auth, Gmail, AI, Pub/Sub).
+*   `src/durable-objects/`: Durable Object definitions.
+*   `wrangler.jsonc`: Worker deployment configuration.
 
-## Important Notes
+## Security
 
-*   **Gmail API Scopes:** The application requests necessary scopes for reading emails, managing labels, filters, and basic settings. Users will be prompted for consent.
-*   **Security:** Ensure all secrets are managed via `wrangler secret put` and are not hardcoded or committed to version control.
-*   **Pub/Sub JWT Validation:** The JWT validation for incoming Pub/Sub messages in `src/index.ts` (`/pubsub` route) is crucial for production security and should be enabled.
+*   Use `wrangler secret put` for all sensitive credentials.
+*   **Enable and verify Pub/Sub JWT validation in `src/index.ts` for production.**
+*   Review requested Gmail API scopes for least privilege.
