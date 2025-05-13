@@ -604,7 +604,8 @@ function getOtpFilterQuery(): string {
         "recover your account password request instructions",
         "park your account",
         "park my account",
-        "forgotten your password"
+        "forgotten your password",
+				"signed up for a new account or requested a password or email change"
     ];
     const uniquePhrases = [...new Set(phrases.map(p => p.toLowerCase().trim()))];
     return uniquePhrases.map(phrase => `"${phrase}"`).join(' OR ');

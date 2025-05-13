@@ -14,16 +14,34 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install pnpm
+      uses: pnpm/action-setup@v3
+      with:
+        version: 8
+
+    - name: Install dependencies
+      run: pnpm install --frozen-lockfile
+
+    - name: Build Chrome extension
+      run: pnpm build
 
     - name: Get version from tag
       id: get_version
       run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
 
-    - name: Zip Chrome extension
+    - name: Zip Chrome extension build output
       run: |
         mkdir -p build-output
-        zip -r "build-output/quick-otp-v.${{ env.VERSION }}.zip" chrome-extension/
+        cd dist/chrome
+        zip -r "../../build-output/quick-otp-v.${{ env.VERSION }}.zip" .
+        cd ../..
 
     - name: Create GitHub Release
       id: create_release
@@ -34,8 +52,9 @@ jobs:
         tag_name: ${{ github.ref_name }}
         release_name: "Quick OTP v${{ env.VERSION }}"
         body: |
-          ## Changes in this release
-          - Add detailed release notes here
+          # Quick OTP v${{ env.VERSION }}
+
+          TODO: Add detailed release notes here.
         draft: false
         prerelease: false
 
