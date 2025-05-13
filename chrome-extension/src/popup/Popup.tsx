@@ -47,7 +47,7 @@ const Popup: React.FC = () => {
   const [isStoppingWatch, setIsStoppingWatch] = useState<boolean>(false)
 
   // Settings state
-  const [moveToTrash, setMoveToTrash] = useState<boolean>(false)
+  const [moveToTrash, setMoveToTrash] = useState<boolean>(true)
   const [isLoadingPreferences, setIsLoadingPreferences] = useState<boolean>(false)
   const [preferenceError, setPreferenceError] = useState<string | null>(null)
 
@@ -91,7 +91,7 @@ const Popup: React.FC = () => {
           setWatchedLabels(fetchedWatchedIds)
           setSelectedLabels(fetchedWatchedIds);
           // Set preference state from concurrent fetch
-          setMoveToTrash(prefsData.moveToTrash ?? false); 
+          setMoveToTrash(prefsData.moveToTrash ?? true); 
           
         } catch (fetchError: any) {
           console.error("Error fetching initial data:", fetchError.message)
@@ -104,14 +104,14 @@ const Popup: React.FC = () => {
           }
           setAvailableLabels([])
           setWatchedLabels([])
-          setMoveToTrash(false); // Reset pref on error
+          setMoveToTrash(true); // Reset pref on error
         } finally {
           setIsFetchingLabels(false);
         }
       } else {
         setAvailableLabels([])
         setWatchedLabels([])
-        setMoveToTrash(false);
+        setMoveToTrash(true);
         if (isAuthenticatedInitially && !currentToken) {
           console.warn("Auth check passed but no token response found. Forcing logout.")
           doLocalLogout = true;
@@ -122,7 +122,7 @@ const Popup: React.FC = () => {
       setError("Failed to check login status")
       setAvailableLabels([])
       setWatchedLabels([])
-      setMoveToTrash(false);
+      setMoveToTrash(true);
       doLocalLogout = true 
     } finally {
       setAuthInProgress(false)
@@ -130,7 +130,7 @@ const Popup: React.FC = () => {
       if (doLocalLogout) {
         console.log("Performing local logout due to detected session invalidation.")
         setSessionToken(null)
-        setMoveToTrash(false); // Reset preference state on logout
+        setMoveToTrash(true); // Reset preference state on logout
         await oauthManager.logout() 
       }
     }
@@ -143,7 +143,7 @@ const Popup: React.FC = () => {
     setMessage(null)
     setAvailableLabels([])
     setWatchedLabels([])
-    setMoveToTrash(false); // Reset on login attempt
+    setMoveToTrash(true); // Reset on login attempt
     try {
       await oauthManager.login();
       console.log("Login successful, notifying background script to trigger its auth callbacks");
@@ -174,7 +174,7 @@ const Popup: React.FC = () => {
       setSessionToken(null)
       setAvailableLabels([])
       setWatchedLabels([])
-      setMoveToTrash(false);
+      setMoveToTrash(true);
       setMessage("Logged out successfully");
       setTimeout(() => setMessage(null), 3000);
     } catch (error: any) {

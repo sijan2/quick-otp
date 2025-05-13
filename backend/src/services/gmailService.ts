@@ -800,7 +800,7 @@ export async function recreateOtpFilter(
             return null;
         }
 
-        const moveToTrash = tokenData.moveToTrash ?? false; // Default to false if undefined
+        const moveToTrash = tokenData.moveToTrash ?? true; // Default to true
         const expectedFilterQuery = getOtpFilterQuery();
 
         console.log(`[GmailService: ${userId}] Calling ensureOtpFilterWorker. LabelID: ${tokenData.otpLabelId}, MoveToTrash: ${moveToTrash}`);
