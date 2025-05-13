@@ -763,7 +763,7 @@ export async function setupGmailOtpAutomation(
             return { success: false, message: 'Failed to ensure "otp" label.', otpLabelId: null, filterId: null, labelEnsured: false, filterOperationAttempted: false };
         }
         const expectedFilterQuery = getOtpFilterQuery();
-        finalFilter = await ensureOtpFilterWorker(accessToken, labelResult.id, expectedFilterQuery, false);
+        finalFilter = await ensureOtpFilterWorker(accessToken, labelResult.id, expectedFilterQuery, true);
 
         if (!finalFilter || !finalFilter.id) {
             console.error(`[GmailService: ${userId}] OTP filter setup step failed.`);
