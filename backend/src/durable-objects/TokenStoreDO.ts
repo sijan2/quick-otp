@@ -25,6 +25,9 @@ export class TokenStoreDO extends DurableObject<Env> {
     // Keep constructor lightweight
   }
 
+  /* Hiding this fetch method as it appears unused by index.ts,
+  // which interacts with TokenStoreDO via direct method calls.
+  // This reduces attack surface. Test thoroughly before final removal.
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -88,6 +91,7 @@ export class TokenStoreDO extends DurableObject<Env> {
       return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: { "Content-Type": "application/json" }});
     }
   }
+  */
 
   // Store token data in DO state
   async storeTokens(
@@ -100,12 +104,16 @@ export class TokenStoreDO extends DurableObject<Env> {
     idToken?: string | null // Added optional idToken for initial storage
   ): Promise<void> {
     try {
-      const encryptedRefreshToken = encryptToken(refreshToken, this.env.TOKEN_ENCRYPTION_KEY);
-      const encryptedAccessToken = encryptToken(accessToken, this.env.TOKEN_ENCRYPTION_KEY);
-      let encryptedIdToken: string | null = null;
+      const encryptPromises = [
+        encryptToken(refreshToken, this.env.TOKEN_ENCRYPTION_KEY),
+        encryptToken(accessToken, this.env.TOKEN_ENCRYPTION_KEY),
+      ];
       if (idToken) {
-        encryptedIdToken = encryptToken(idToken, this.env.TOKEN_ENCRYPTION_KEY);
+        encryptPromises.push(encryptToken(idToken, this.env.TOKEN_ENCRYPTION_KEY));
       }
+
+      const [encryptedRefreshToken, encryptedAccessToken, idTokenEncryptedResult] = await Promise.all(encryptPromises);
+      const encryptedIdToken = idToken ? idTokenEncryptedResult : null;
 
       const existingTokenData = await this.ctx.storage.get<TokenData>(`user:${userId}`);
 
@@ -200,13 +208,13 @@ export class TokenStoreDO extends DurableObject<Env> {
     // Check if token is expired (with a 5-minute buffer)
     const now = Math.floor(Date.now() / 1000);
     if (tokenData.expiry > now + 300) {
-      return decryptToken(tokenData.encryptedAccessToken, this.env.TOKEN_ENCRYPTION_KEY);
+      return await decryptToken(tokenData.encryptedAccessToken, this.env.TOKEN_ENCRYPTION_KEY);
     }
 
     console.log(`[TokenStoreDO: ${userId}] Access token expired or nearing expiry. Attempting refresh.`);
     try {
       // Token is expired, refresh it
-      const rawRefreshToken = decryptToken(tokenData.encryptedRefreshToken, this.env.TOKEN_ENCRYPTION_KEY);
+      const rawRefreshToken = await decryptToken(tokenData.encryptedRefreshToken, this.env.TOKEN_ENCRYPTION_KEY);
 
       // Call the authService's refreshAccessToken which now returns more data
       const refreshedGoogleData = await refreshAccessToken(rawRefreshToken, this.env.GOOGLE_CLIENT_ID, this.env.GOOGLE_CLIENT_SECRET);
@@ -323,7 +331,7 @@ export class TokenStoreDO extends DurableObject<Env> {
     try {
       const tokenData = await this.getTokenByUserId(userId);
       if (tokenData && tokenData.encryptedRefreshToken) {
-        return decryptToken(tokenData.encryptedRefreshToken, this.env.TOKEN_ENCRYPTION_KEY);
+        return await decryptToken(tokenData.encryptedRefreshToken, this.env.TOKEN_ENCRYPTION_KEY);
       }
       return null;
     } catch (error: any) {
@@ -345,11 +353,11 @@ export class TokenStoreDO extends DurableObject<Env> {
         throw new Error(`No token data found for user ${userId} to update after refresh.`);
       }
 
-      tokenData.encryptedAccessToken = encryptToken(newRawAccessToken, this.env.TOKEN_ENCRYPTION_KEY);
+      tokenData.encryptedAccessToken = await encryptToken(newRawAccessToken, this.env.TOKEN_ENCRYPTION_KEY);
       tokenData.expiry = newExpiryTimestamp;
 
       if (newRawIdToken) {
-        tokenData.encryptedIdToken = encryptToken(newRawIdToken, this.env.TOKEN_ENCRYPTION_KEY);
+        tokenData.encryptedIdToken = await encryptToken(newRawIdToken, this.env.TOKEN_ENCRYPTION_KEY);
         console.log(`[TokenStoreDO: ${userId}] Updated with new encryptedIdToken.`);
       } else if (newRawIdToken === null) {
         // Explicitly clear if null is passed (Google didn't return one, or it should be cleared)

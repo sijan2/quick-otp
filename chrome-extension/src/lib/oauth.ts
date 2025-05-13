@@ -8,48 +8,88 @@ interface TokenResponse {
   token_type: string
   scope: string
   id_token?: string
-  expiryTimestamp: number
-  email?: string // Add email field for our custom uses
+  expiryTimestamp: number // Milliseconds since epoch
+  email?: string
+  userId?: string
 }
 
+type AuthSuccessCallback = (idToken: string) => void;
+
 class OAuthManager {
-  // Required scopes for your use case
-  // Include OpenID scopes so Google returns an ID token (needed for backend registration & WebSocket auth)
+  // Required OAuth scopes.
+  // OpenID scopes are included to ensure Google returns an ID token,
+  // which is necessary for backend registration and WebSocket authentication.
   private static readonly SCOPES = [
     "openid",
     "email",
     "profile",
     "https://mail.google.com/",
   ]
-  
+
   private storage: Storage
   private authInProgress: boolean = false
-  private authPromise: Promise<string> | null = null // This promise will now resolve with id_token
+  private authPromise: Promise<string> | null = null
+  private authSuccessCallbacks: AuthSuccessCallback[] = []
 
   constructor() {
     this.storage = new Storage()
   }
 
   /**
-   * Ensures the user is authenticated and returns a valid ID token.
-   * If no token found or it's expired, initiates the login flow.
+   * Registers a callback to be executed upon successful authentication.
+   * If authentication has already occurred, the callback is invoked immediately.
+   * @param callback Function to execute with the ID token.
    */
-  public async getIdToken(): Promise<string> { // Renamed, returns id_token
+  public onAuthSuccess(callback: AuthSuccessCallback): void {
+    this.authSuccessCallbacks.push(callback)
+    // console.log(`[OAuthManager] Added auth success callback. Total callbacks: ${this.authSuccessCallbacks.length}`)
+
+    // If already authenticated, trigger callback immediately.
+    this.getTokenResponse().then(tokenResponse => {
+      if (tokenResponse?.id_token && !this.isTokenExpired(tokenResponse)) {
+        // console.log('[OAuthManager] Already authenticated, triggering callback immediately')
+        callback(tokenResponse.id_token)
+      }
+    }).catch(err => {
+      console.error('[OAuthManager] Error checking existing token for immediate callback:', err)
+    })
+  }
+
+  /**
+   * Executes all registered authentication success callbacks.
+   * @param idToken The ID token to pass to the callbacks.
+   */
+  private triggerAuthSuccessCallbacks(idToken: string): void {
+    // console.log(`[OAuthManager] Triggering ${this.authSuccessCallbacks.length} auth success callbacks`)
+    for (const callback of this.authSuccessCallbacks) {
+      try {
+        callback(idToken)
+      } catch (error) {
+        console.error('[OAuthManager] Error in auth success callback:', error)
+      }
+    }
+  }
+
+  /**
+   * Ensures the user is authenticated and returns a valid ID token.
+   * If a valid token is not found or is expired, this method attempts to refresh it via the backend.
+   * If backend refresh fails or is not possible, and `interactiveLoginPermitted` is true,
+   * it initiates the interactive login flow.
+   * @param interactiveLoginPermitted If true, allows fallback to interactive login. Defaults to true.
+   * @returns A promise that resolves with the ID token, or null if authentication fails and interactive login is not permitted.
+   */
+  public async getIdToken(interactiveLoginPermitted: boolean = true): Promise<string | null> {
     try {
-      // If authentication is already in progress, return the existing promise
       if (this.authInProgress && this.authPromise) {
-        // console.log("Auth already in progress, waiting for id_token...");
         return this.authPromise;
       }
 
-      // console.log("Getting ID token...");
       let tokenResponse = await this.getTokenResponse();
 
       if (!tokenResponse || !tokenResponse.id_token || this.isTokenExpired(tokenResponse)) {
-        console.log("[OAuthManager] No valid local id_token. Attempting backend refresh first.");
+        // console.log("[OAuthManager] No valid local id_token. Attempting backend refresh first.");
         this.authInProgress = true;
 
-        // Attempt backend refresh if we have an id_token (even if expired) to identify the user
         if (tokenResponse && tokenResponse.id_token) {
           try {
             const backendRefreshResponse = await fetch(`${config.BACKEND_URL}/auth/refresh-google-tokens`, {
@@ -62,105 +102,92 @@ class OAuthManager {
 
             if (backendRefreshResponse.ok) {
               const newTokens = await backendRefreshResponse.json();
-              if (newTokens.id_token && typeof newTokens.id_token === 'string' && newTokens.new_id_token_expiry_timestamp) {
-                console.log("[OAuthManager] Successfully refreshed id_token via backend.");
-                // Construct a new tokenResponse structure for local storage
+              if (newTokens.id_token && typeof newTokens.id_token === 'string' &&
+                  newTokens.new_id_token_expiry_timestamp && typeof newTokens.new_id_token_expiry_timestamp === 'number' &&
+                  newTokens.email && typeof newTokens.email === 'string' &&
+                  newTokens.user_id && typeof newTokens.user_id === 'string') {
+                // console.log("[OAuthManager] Successfully refreshed id_token via backend with verified claims.");
+
                 const refreshedTokenResponse: TokenResponse = {
                   id_token: newTokens.id_token,
                   expiryTimestamp: newTokens.new_id_token_expiry_timestamp * 1000, // Convert sec to ms
-                  access_token: "managed_by_backend", // Placeholder
-                  email: (this.decodeEmailFromIdToken(newTokens.id_token) ?? tokenResponse?.email) ?? "",
+                  access_token: "managed_by_backend",
+                  email: newTokens.email,
+                  userId: newTokens.user_id,
                   expires_in: Math.max(0, Math.floor((newTokens.new_id_token_expiry_timestamp * 1000 - Date.now()) / 1000)),
-                  scope: (tokenResponse?.scope ?? this.decodeScopeFromIdToken(newTokens.id_token)) ?? OAuthManager.SCOPES.join(" "),
+                  scope: tokenResponse?.scope || OAuthManager.SCOPES.join(" "),
                   token_type: "Bearer",
                 };
                 await this.storage.set("tokenResponse", refreshedTokenResponse);
                 this.authInProgress = false;
+                this.triggerAuthSuccessCallbacks(newTokens.id_token);
                 return newTokens.id_token;
               } else {
-                console.warn("[OAuthManager] Backend refresh responded OK but did not return new id_token string or expiry.");
+                console.warn("[OAuthManager] Backend refresh responded OK but did not return all required token data.");
               }
             } else {
               const errorData = await backendRefreshResponse.json().catch(() => ({ message: "Unknown error during backend refresh"}));
               console.warn(`[OAuthManager] Backend refresh failed (status: ${backendRefreshResponse.status}): ${errorData.message}. Falling back to interactive login.`);
-              // Specific error handling if needed, e.g., if (errorData.error === 'refresh_token_not_found') { ... }
             }
           } catch (fetchError: any) {
             console.error("[OAuthManager] Error calling backend refresh endpoint:", fetchError.message, ". Falling back to interactive login.");
           }
         } else {
-          console.log("[OAuthManager] No local id_token at all to attempt backend refresh. Proceeding to interactive login.");
+          // console.log("[OAuthManager] No local id_token at all to attempt backend refresh. Proceeding to interactive login.");
         }
-        
-        // If backend refresh was not attempted, failed, or didn't yield a token, fall back to interactive login
-        console.log("[OAuthManager] Falling back to interactive login flow (launchWebAuthFlow).");
-        this.authPromise = this.loginWithLock(); // loginWithLock now returns id_token
+
+        if (!interactiveLoginPermitted) {
+          // console.log("[OAuthManager] Interactive login required but not permitted by this call. Returning null.");
+          this.authInProgress = false;
+          this.authPromise = null;
+          return null;
+        }
+
+        // console.log("[OAuthManager] Falling back to interactive login flow (launchWebAuthFlow). Permitted by caller.");
+        this.authPromise = this.loginWithLock();
         return this.authPromise;
-      } 
-      // console.log("Using existing valid id_token.");
-      // Return the valid id_token
+      }
       return tokenResponse.id_token;
-    } catch (error) {
-      console.error("Error in getIdToken:", error);
+    } catch (error: any) {
+      console.error("Error in getIdToken:", error.message, error.stack);
       this.authInProgress = false;
       this.authPromise = null;
-      throw error;
-    }
-  }
-
-  // Helper to decode email from id_token (basic, no full validation here)
-  private decodeEmailFromIdToken(idToken: string): string | null {
-    try {
-      const payload = idToken.split(".")[1];
-      const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-      return decoded.email || null;
-    } catch (e) {
-      return null;
-    }
-  }
-   // Helper to decode scope from id_token (basic, no full validation here)
-  private decodeScopeFromIdToken(idToken: string): string | null {
-    try {
-      const payload = idToken.split(".")[1];
-      const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-      return decoded.scope || null;
-    } catch (e) {
-      return null;
+      throw error; // Rethrow other unexpected errors
     }
   }
 
   /**
-   * Wrapper around login that ensures only one login flow can happen at a time.
-   * Returns the ID token upon successful login.
+   * Manages the login process, ensuring only one interactive login flow occurs at a time.
+   * @returns A promise that resolves with the ID token upon successful login.
    */
-  private async loginWithLock(): Promise<string> { // Returns id_token
+  private async loginWithLock(): Promise<string> {
     try {
       const tokenResponse = await this.login()
-      if (!tokenResponse.id_token) { // Should always have id_token after successful login
+      if (!tokenResponse.id_token) {
         throw new Error("Login completed but id_token was missing.");
       }
-      return tokenResponse.id_token // Return the id_token
+      this.triggerAuthSuccessCallbacks(tokenResponse.id_token);
+      return tokenResponse.id_token
     } finally {
-      // Reset auth status when done regardless of success or failure
       this.authInProgress = false
       this.authPromise = null
     }
   }
 
   /**
-   * Uses launchWebAuthFlow to trigger the backend OAuth flow 
-   * and parse the id_token from the final redirect URL.
+   * Initiates the OAuth 2.0 authorization code flow using `chrome.identity.launchWebAuthFlow`.
+   * This method communicates with the backend to handle the OAuth dance with Google,
+   * ultimately receiving an ID token, email, expiry timestamp, and user ID.
+   * @returns A promise that resolves with an object containing the id_token, email, expiryTimestamp, and userId.
    */
-  private async launchWebAuthFlow(): Promise<{ id_token: string }> { // Returns object with id_token
-    // Construct the URL to your backend's login endpoint
-    // It needs to know where to redirect back to the extension
+  private async launchWebAuthFlow(): Promise<{ id_token: string, email: string, expiryTimestamp: number, userId: string }> {
     const backendLoginUrl = new URL(config.BACKEND_URL + '/auth/login');
-    const extensionCallbackUrl = `https://${chrome.runtime.id}.chromiumapp.org`; // Default callback for extensions
+    // The extension callback URL must match what's configured in the Google Cloud Console
+    // and what the backend expects to redirect to.
+    const extensionCallbackUrl = `https://${chrome.runtime.id}.chromiumapp.org`;
     backendLoginUrl.searchParams.set('redirectUrl', extensionCallbackUrl);
 
-    // console.log(`[OAuth] Starting auth flow via backend: ${backendLoginUrl.toString()}`);
-
-    return new Promise<{ id_token: string }>((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       chrome.identity.launchWebAuthFlow(
         {
           url: backendLoginUrl.toString(),
@@ -176,126 +203,108 @@ class OAuthManager {
               )
             )
           }
-          
-          // console.log(`[OAuth] Received callback URL: ${callbackUrl}`);
 
-          // Parse the parameters from the final redirect URL (sent by your backend /auth/callback)
           const urlParams = new URLSearchParams(callbackUrl.split('?')[1] || "");
           const id_token = urlParams.get("id_token");
-          const error = urlParams.get("error"); // Check if backend indicated an error
+          const error = urlParams.get("error");
+          const email = urlParams.get("email");
+          const expiryTimestampStr = urlParams.get("expiry_timestamp"); // Seconds
+          const userId = urlParams.get("user_id");
 
           if (error) {
             return reject(new Error(`OAuth callback error from backend: ${error}`))
           }
 
-          if (!id_token) {
-            // console.error("[OAuth] No id_token found in callback URL:", callbackUrl);
+          if (!id_token || !email || !expiryTimestampStr || !userId) {
             return reject(
-              new Error('No id_token parameter returned in callback URL from backend.')
+              new Error('Required token information (id_token, email, expiry, userId) not returned in callback URL from backend.')
             )
           }
-          
-          // console.log("[OAuth] Extracted id_token successfully.");
-          resolve({ id_token }); // Resolve with the id_token
+
+          const expiryTimestamp = parseInt(expiryTimestampStr, 10) * 1000; // Convert to ms
+          if (isNaN(expiryTimestamp)) {
+            return reject(new Error('Invalid expiry_timestamp received from backend.'));
+          }
+
+          resolve({ id_token, email, expiryTimestamp, userId });
         }
       )
     })
   }
 
   /**
-   * Initiates the OAuth flow, obtains an authorization code, exchanges for tokens, stores them.
+   * Initiates the login flow. It calls `launchWebAuthFlow` to obtain token information
+   * from the backend (which handles the Google OAuth interaction) and stores a minimal
+   * `TokenResponse` locally.
+   * @returns A promise that resolves with the `TokenResponse`.
    */
-  public async login(): Promise<TokenResponse> { // Keep TokenResponse for structure, but focus on id_token
+  public async login(): Promise<TokenResponse> {
     try {
-      // console.log("Starting login flow...");
-      const authResult = await this.launchWebAuthFlow(); // Gets { id_token }
-      const id_token = authResult.id_token;
-      // console.log("ID Token obtained from auth flow.");
+      const { id_token, email, expiryTimestamp, userId } = await this.launchWebAuthFlow();
 
-      // Backend now handles token storage via /auth/callback.
-      // We just need to store the relevant parts locally if needed.
-      // For WebSocket connection, we primarily need the id_token.
-      // The structure of TokenResponse might need adjustment if refresh/access tokens aren't sent back.
-      
-      // Construct a minimal TokenResponse for local storage/use
-      // We don't get access/refresh tokens directly back here anymore.
-      // We rely on the id_token to get the wsToken later.
-      const minimalTokenResponse: Partial<TokenResponse> = { 
+      const minimalTokenResponse: TokenResponse = {
           id_token: id_token,
-          // access_token: ??? // Not available directly from this flow
-          // refresh_token: ??? // Stays on backend
-          // expires_in: ??? 
-          // expiryTimestamp: ??? // Need to decode id_token to get expiry
-          // email: ??? // Need to decode id_token
+          email: email,
+          expiryTimestamp: expiryTimestamp, // Already in ms
+          userId: userId,
+          access_token: "managed_by_backend", // Placeholder, as backend manages the actual access token
+          expires_in: Math.max(0, Math.floor((expiryTimestamp - Date.now()) / 1000)), // Calculated from ms expiry
+          token_type: "Bearer",
+          scope: OAuthManager.SCOPES.join(" "), // Default scope
       };
 
-      // Decode id_token to get expiry and email for local storage/use
-      try {
-          const payload = id_token.split(".")[1];
-          const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-          minimalTokenResponse.expiryTimestamp = decoded.exp * 1000; // exp is in seconds
-          minimalTokenResponse.email = decoded.email;
-          // We can make up a placeholder expires_in based on expiryTimestamp
-          minimalTokenResponse.expires_in = Math.max(0, Math.floor((minimalTokenResponse.expiryTimestamp - Date.now()) / 1000));
-          // Add dummy values for other fields if needed by downstream code expecting TokenResponse structure
-          minimalTokenResponse.access_token = "managed_by_backend"; 
-          minimalTokenResponse.token_type = "Bearer";
-          minimalTokenResponse.scope = decoded.scope || "openid email profile https://mail.google.com/"; // Get scope if present
-
-      } catch(e) {
-          console.error("Failed to decode id_token received from callback", e);
-          throw new Error("Received invalid id_token from backend.");
-      }
-
-      // console.log("Storing minimal token response locally...");
-      await this.storage.set("tokenResponse", minimalTokenResponse as TokenResponse); // Store the processed data
-
-      // The `connectWebSocket` function will now use this stored id_token.
-      // No need to call backend registration here, it happened in /auth/callback.
-
-      return minimalTokenResponse as TokenResponse;
+      await this.storage.set("tokenResponse", minimalTokenResponse);
+      return minimalTokenResponse;
 
     } catch (error) {
       console.error("Error in login flow:", error);
-      // Ensure storage is cleared on error
-      await this.storage.remove("tokenResponse");
+      await this.storage.remove("tokenResponse"); // Ensure local token is cleared on error
       throw error;
     }
   }
 
   /**
-   * Returns the current TokenResponse from storage (or null if none).
+   * Retrieves the current `TokenResponse` from storage.
+   * Handles migration from an old token format if necessary.
+   * @returns A promise that resolves with the `TokenResponse` or null if not found.
    */
   public async getTokenResponse(): Promise<TokenResponse | null> {
     const tokenResponse = await this.storage.get<any>("tokenResponse");
-    
+
     if (!tokenResponse) return null;
-    
-    // Handle migration from old format (expiryDate) to new format (expiryTimestamp)
-    if (tokenResponse.expiryDate && !tokenResponse.expiryTimestamp) {
+
+    // Migration for tokens stored with 'expiryDate' instead of 'expiryTimestamp'
+    if (tokenResponse.expiryDate && typeof tokenResponse.expiryDate === 'string' && !tokenResponse.expiryTimestamp) {
       // console.log("Migrating token format from expiryDate to expiryTimestamp");
-      
-      // Convert the old stored tokenResponse to the new format
+      const { expiryDate, ...restOfOldToken } = tokenResponse; // Destructure to remove expiryDate
+
+      const newExpiryTimestamp = new Date(expiryDate).getTime();
+
       const migratedTokenResponse: TokenResponse = {
-        access_token: tokenResponse.access_token,
-        refresh_token: tokenResponse.refresh_token,
-        expires_in: tokenResponse.expires_in,
-        token_type: tokenResponse.token_type,
-        scope: tokenResponse.scope,
-        id_token: tokenResponse.id_token,
-        expiryTimestamp: Date.now() + 300000 // Add 5 minutes to current time to allow for refresh
+        access_token: restOfOldToken.access_token || "managed_by_backend",
+        refresh_token: restOfOldToken.refresh_token, // Will be undefined if not present, which is fine for an optional field
+        expires_in: restOfOldToken.expires_in !== undefined 
+          ? restOfOldToken.expires_in 
+          : Math.max(0, Math.floor((newExpiryTimestamp - Date.now()) / 1000)),
+        token_type: restOfOldToken.token_type || "Bearer",
+        scope: restOfOldToken.scope || OAuthManager.SCOPES.join(" "),
+        id_token: restOfOldToken.id_token,
+        expiryTimestamp: newExpiryTimestamp,
+        email: restOfOldToken.email,
+        userId: restOfOldToken.userId,
       };
-      
-      // Store the migrated token
+      // expiryDate is not part of migratedTokenResponse due to destructuring, so no delete needed.
+
       await this.storage.set("tokenResponse", migratedTokenResponse);
       return migratedTokenResponse;
     }
-    
-    return tokenResponse;
+
+    return tokenResponse as TokenResponse;
   }
 
   /**
-   * Clears local token data, calls backend logout, and attempts to revoke the token if applicable.
+   * Clears local token data, notifies the backend to log out the user,
+   * and requests the background script to close any active WebSocket connection.
    */
   public async logout(): Promise<void> {
     try {
@@ -314,37 +323,35 @@ class OAuthManager {
             });
             if (!response.ok) {
               const errorData = await response.json().catch(() => ({ message: 'Failed to logout from backend, unknown error' }));
-              // console.error('Backend logout failed:', response.status, errorData);
+              console.error('Backend logout failed:', response.status, errorData.message || 'Unknown error');
             } else {
               // console.log('[OAuthManager] Successfully logged out from backend.');
             }
-          } catch (fetchError) {
-            console.error('[OAuthManager] Error calling backend logout endpoint:', fetchError);
+          } catch (fetchError: any) {
+            console.error('[OAuthManager] Error calling backend logout endpoint:', fetchError.message);
           }
         } else {
-          // console.error("Backend URL is not configured. Skipping backend logout.");
+          console.warn("[OAuthManager] Backend URL is not configured. Skipping backend logout.");
         }
       } else {
         // console.warn('[OAuthManager] No ID token found locally. Skipping backend logout call.');
       }
 
-      // Attempt to revoke Google token (mostly symbolic as client doesn't hold real access token)
-      await this.revokeGoogleAccessTokenInternally(tokenResponse); 
+      // Client-side revocation of Google access token is generally not effective here
+      // as the actual access token is managed by the backend.
+      // await this.revokeGoogleAccessTokenInternally(tokenResponse);
 
-      // Explicitly tell background to close WebSocket
       try {
         // console.log("[OAuthManager] Requesting background script to close WebSocket.");
         await chrome.runtime.sendMessage({ action: "explicitWsClose" });
-        // console.log("[OAuthManager] Sent explicitWsClose message to background.");
       } catch (e: any) {
-        // Error sending message is fine if background isn't active or listening (e.g. during uninstall)
+        // This can happen if the background script is inactive (e.g., during extension uninstall/reload)
         // console.warn("[OAuthManager] Could not send explicitWsClose to background (it might be inactive):", e.message);
       }
 
-    } catch (error) {
-      console.error("Error during logout process:", error)
+    } catch (error: any) {
+      console.error("Error during logout process:", error.message)
     } finally {
-      // Always clear local storage as the primary client-side logout action
       await this.storage.remove("tokenResponse")
       // console.log("[OAuthManager] Local tokenResponse cleared.");
     }
@@ -352,12 +359,11 @@ class OAuthManager {
 
   /**
    * Internal helper to attempt revoking Google's access token.
-   * Note: With the current flow, the client might only have a placeholder access_token.
+   * Note: With the current OAuth flow, the client-side `access_token` is a placeholder
+   * ("managed_by_backend"), so this client-side revocation is largely symbolic.
+   * True token revocation should be handled by the backend.
    */
   private async revokeGoogleAccessTokenInternally(tokenResponse: TokenResponse | null): Promise<void> {
-    // The access_token stored by this oauthManager is often a placeholder like "managed_by_backend".
-    // Revoking it with Google won't achieve much. True revocation should happen on the backend.
-    // However, if a real access_token somehow was stored, this would attempt to revoke it.
     if (tokenResponse?.access_token && tokenResponse.access_token !== "managed_by_backend") {
       try {
         // console.log(`[OAuthManager] Attempting to revoke Google access token: ${tokenResponse.access_token.substring(0,10)}...`);
@@ -369,13 +375,12 @@ class OAuthManager {
 
         if (!response.ok) {
           const errorText = await response.text();
-          // console.warn(`[OAuthManager] Google token revocation request failed: ${response.status} ${errorText}`);
-          // Not throwing an error here as backend logout is more critical and local storage clear will happen.
+          console.warn(`[OAuthManager] Google token revocation request failed: ${response.status} ${errorText}`);
         } else {
           // console.log("[OAuthManager] Google access token revocation request successful (if token was valid).");
         }
-      } catch (error) {
-        // console.warn("[OAuthManager] Error sending Google token revocation request:", error)
+      } catch (error: any) {
+        console.warn("[OAuthManager] Error sending Google token revocation request:", error.message)
       }
     } else {
       // console.log("[OAuthManager] Skipping Google access token revocation on client-side (no real access token or placeholder found).");
@@ -383,35 +388,27 @@ class OAuthManager {
   }
 
   /**
-   * DEPRECATED or for specific use cases: Revokes the current stored access token via Google's revoke endpoint.
-   * Prefer backend-initiated revocation for tokens stored on the backend.
+   * Checks if the stored token is expired.
+   * A token is considered expired if its `expiryTimestamp` is in the past,
+   * or within a small buffer window (5 minutes) to account for clock skew and processing time.
+   * @param tokenResponse The token response to check.
+   * @returns True if the token is expired or invalid, false otherwise.
    */
-  public async revokeAccessToken(): Promise<void> {
-    // console.warn("[OAuthManager] revokeAccessToken() called. Note: client-side revocation is limited if real tokens are backend-managed.");
-    const tokenResponse = await this.getTokenResponse();
-    await this.revokeGoogleAccessTokenInternally(tokenResponse);
-    // This method might be called directly by UI, so ensure local tokens are also cleared if intent is full logout.
-    // However, the main `logout` method is now more comprehensive.
-  }
-
-  /**
-   * Check if the token is expired based on `expiryTimestamp`.
-   */
-  private isTokenExpired(tokenResponse: TokenResponse): boolean {
+  private isTokenExpired(tokenResponse: TokenResponse | null): boolean {
     if (!tokenResponse || typeof tokenResponse.expiryTimestamp !== 'number') {
-      return true; // Invalid or missing timestamp
+      return true; // No token, or timestamp is invalid/missing.
     }
-    // Check expiryTimestamp (obtained from decoding id_token)
-    const expirationBuffer = 5 * 60 * 1000 // 5 minutes
+    const expirationBuffer = 5 * 60 * 1000 // 5 minutes buffer.
     return tokenResponse.expiryTimestamp <= Date.now() + expirationBuffer
   }
 
   /**
-   * Check if a user is currently authenticated with a valid token
+   * Checks if the user is currently authenticated with a valid (non-expired) token.
+   * @returns A promise that resolves to true if authenticated, false otherwise.
    */
   public async isAuthenticated(): Promise<boolean> {
     const tokenResponse = await this.getTokenResponse();
-    return tokenResponse !== null && !this.isTokenExpired(tokenResponse);
+    return !!tokenResponse && !this.isTokenExpired(tokenResponse);
   }
 }
 

@@ -11,7 +11,8 @@ import {
   verifyAndDecodeIdToken,
   revokeGoogleToken,
   generateWebSocketToken,
-  processAndStoreRefreshedGoogleTokens
+  processAndStoreRefreshedGoogleTokens,
+  validatePubSubJwt
 } from './services/authService';
 import {
   setupGmailWatch,
@@ -153,8 +154,16 @@ router.get('/auth/callback', async (request: Request, env: Env): Promise<Respons
 
     // Redirect back to extension
     const redirectUrl = session.redirectUrl || 'chrome-extension://your-extension-id/callback.html'; // Placeholder
-    const redirectWithToken = `${redirectUrl}?id_token=${tokens.id_token}`;
-    return Response.redirect(redirectWithToken, 302);
+    // const redirectWithToken = `${redirectUrl}?id_token=${tokens.id_token}`;
+    const redirectParams = new URLSearchParams({
+      id_token: tokens.id_token,
+      email: idTokenPayload.email, // Add verified email
+      // exp is a standard claim in idTokenPayload from a verified token
+      expiry_timestamp: idTokenPayload.exp ? idTokenPayload.exp.toString() : '', // Add verified expiry (seconds)
+      user_id: idTokenPayload.sub, // Add verified user_id (sub)
+    });
+    const redirectWithTokenAndInfo = `${redirectUrl}?${redirectParams.toString()}`;
+    return Response.redirect(redirectWithTokenAndInfo, 302);
 
   } catch (error: any) {
     console.error('Error in OAuth callback:', error);
@@ -442,8 +451,36 @@ router.get('/api/list-labels', async (request: Request, env: Env): Promise<Respo
 router.post('/pubsub', async (request: Request, env: Env, ctx: ExecutionContext): Promise<Response> => {
   try {
     console.log('[PubSub] Received PubSub notification');
-    // Removed JWT validation for simplicity - RE-ENABLE FOR PRODUCTION
-    // const authHeader = request.headers.get('Authorization'); ... validatePubSubJwt ...
+
+    // --- JWT Validation for Pub/Sub --- START ---
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.error('[PubSub] Unauthorized: Missing or malformed Authorization header.');
+      return new Response('Unauthorized: Missing or invalid Authorization header.', { status: 401 });
+    }
+    const token = authHeader.substring(7); // Extract token after 'Bearer '
+
+    // Use the dedicated environment variable for Pub/Sub audience
+    const expectedAudience = env.GOOGLE_PUBSUB_JWT_AUDIENCE;
+    if (!expectedAudience) {
+      console.error('[PubSub] CRITICAL: PUBSUB_AUDIENCE (or GOOGLE_PUBSUB_JWT_AUDIENCE) environment variable is not set.');
+      return new Response('Server configuration error for Pub/Sub authentication.', { status: 500 });
+    }
+
+    const expectedServiceAccountEmail = env.PUBSUB_SERVICE_ACCOUNT_EMAIL;
+    if (!expectedServiceAccountEmail) { // Add check for required environment variable
+      console.error('[PubSub] CRITICAL: PUBSUB_SERVICE_ACCOUNT_EMAIL environment variable is not set.');
+      return new Response('Server configuration error for Pub/Sub authentication.', { status: 500 });
+    }
+
+    try {
+      await validatePubSubJwt(token, expectedAudience, expectedServiceAccountEmail);
+      console.log('[PubSub] Pub/Sub JWT validation successful.');
+    } catch (jwtError: any) {
+      console.error(`[PubSub] Unauthorized: Pub/Sub JWT validation failed: ${jwtError.message}`);
+      return new Response(`Unauthorized: JWT validation failed: ${jwtError.message}`, { status: 401 }); // 401 or 403
+    }
+    // --- JWT Validation for Pub/Sub --- END ---
 
     const body = await request.json() as any; // Use any for flexibility during parsing attempts
     const notification = parsePubSubMessage(body);
@@ -539,11 +576,15 @@ router.post('/auth/refresh-google-tokens', async (request: Request, env: Env): P
 
     // 3. Success: return the new ID token and its expiry to the extension
     console.log(`[Refresh Route: ${userIdFromToken}] Successfully refreshed ID token.`);
+    // Decode the new ID token to get its claims securely
+    const newIdTokenPayload = await verifyAndDecodeIdToken(refreshResult.newIdToken, env.GOOGLE_CLIENT_ID);
+
     return new Response(JSON.stringify({
       id_token: refreshResult.newIdToken,
-      // The extension will typically decode the id_token to get its actual 'exp' claim.
-      // Sending it here is mostly for confirmation or if the extension needs it directly.
-      new_id_token_expiry_timestamp: refreshResult.newIdToken ? (await verifyAndDecodeIdToken(refreshResult.newIdToken, env.GOOGLE_CLIENT_ID)).exp : null
+      // new_id_token_expiry_timestamp: refreshResult.newIdToken ? (await verifyAndDecodeIdToken(refreshResult.newIdToken, env.GOOGLE_CLIENT_ID)).exp : null
+      new_id_token_expiry_timestamp: newIdTokenPayload.exp, // Already verified
+      email: newIdTokenPayload.email, // Add verified email
+      user_id: newIdTokenPayload.sub, // Add verified userId (sub)
     }), { headers: { 'Content-Type': 'application/json' } });
 
   } catch (error: any) {

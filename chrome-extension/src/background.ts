@@ -25,7 +25,6 @@ const MAX_RETRY_COUNT = 5
 // User ID and WebSocket token
 let userId: string | null = null
 let wsToken: string | null = null
-let tokenExpiry: number = 0
 
 // Periodically check WebSocket connection (keep)
 setInterval(async () => {
@@ -97,34 +96,47 @@ setInterval(async () => {
 function authenticateWithGoogle(forceAuth: boolean = false): void {
   const now = Date.now();
   if (!forceAuth && authFailedTimestamp > 0 && (now - authFailedTimestamp) < AUTH_RETRY_COOLDOWN) {
-    console.log("Auth cooldown, skipping retry");
+    console.log("[AuthGoogle] Cooldown active, skipping manual auth attempt.");
     return;
   }
-  if (forceAuth) manualAuthRequested = true;
+  if (forceAuth) {
+    console.log("[AuthGoogle] Manual authentication requested (forceAuth=true).");
+    manualAuthRequested = true;
+  } else {
+    console.log("[AuthGoogle] Authentication attempt (forceAuth=false).");
+  }
 
-  oauthManager.getIdToken()
+  oauthManager.getIdToken() // interactiveLoginPermitted defaults to true
     .then(token => {
         if (token) {
+            console.log("[AuthGoogle] ID token obtained successfully after auth flow. Token (first 10 chars):", token.substring(0,10));
+            console.log("[AuthGoogle] Attempting WebSocket connection immediately.");
             connectWebSocket(); 
         } else {
-            console.warn("ID token not available after auth; WebSocket connection deferred.");
+            console.warn("[AuthGoogle] ID token *not* available after auth flow (token is null). WebSocket connection deferred. This might happen if user cancelled login.");
         }
     })
     .catch(error => {
-      console.error("Failed to authenticate with Google:", error);
+      console.error("[AuthGoogle] Failed to authenticate with Google. Error:", error.message, error);
     });
 }
 
 function connectWebSocket(): void {
-  if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
+  if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
+    console.log("[ConnectWS] WebSocket already open or connecting. Aborting new connection attempt.");
+    return;
+  }
+  console.log("[ConnectWS] Attempting to connect WebSocket (current socket state: " + (socket ? getWebSocketStateString(socket.readyState) : 'null') + ").");
 
   oauthManager.getTokenResponse().then(tokenResponse => {
     if (!tokenResponse?.id_token) {
-      console.warn("Cannot connect WebSocket: Google ID token not available.");
+      console.warn("[ConnectWS] Cannot connect WebSocket: Google ID token not available from getTokenResponse(). Auth might have failed or token not stored.");
       return; 
     }
     const googleIdToken = tokenResponse.id_token;
+    console.log("[ConnectWS] Google ID token retrieved for WebSocket connection (first 10 chars):", googleIdToken.substring(0,10));
 
+    console.log("[ConnectWS] Fetching WebSocket token from backend: ", `${config.BACKEND_URL}/auth/ws-token`);
     fetch(`${config.BACKEND_URL}/auth/ws-token`, {
       method: 'POST',
       headers: {
@@ -133,36 +145,45 @@ function connectWebSocket(): void {
       body: JSON.stringify({ idToken: googleIdToken })
     })
     .then(response => {
+      console.log("[ConnectWS] Response received from /auth/ws-token. Status:", response.status);
       if (!response.ok) {
-        throw new Error(`Failed to get WebSocket token: ${response.status} ${response.statusText}`);
+        // Attempt to read error body for more context
+        return response.text().then(text => {
+          throw new Error(`Failed to get WebSocket token: ${response.status} ${response.statusText}. Body: ${text.substring(0, 200)}`);
+        }).catch(() => { // Fallback if .text() fails
+          throw new Error(`Failed to get WebSocket token: ${response.status} ${response.statusText}. Could not read error body.`);
+        });
       }
       return response.json();
     })
     .then(wsTokenData => { 
+      console.log("[ConnectWS] WebSocket token data received from backend:", wsTokenData ? {userId: wsTokenData.userId, tokenExists: !!wsTokenData.token} : 'null/undefined');
       if (!wsTokenData || !wsTokenData.token || !wsTokenData.userId) {
-          throw new Error("Invalid response from /auth/ws-token endpoint");
+          console.error("[ConnectWS] Invalid or incomplete response from /auth/ws-token endpoint. Data:", wsTokenData);
+          throw new Error("Invalid response from /auth/ws-token endpoint. Token or userId missing.");
       }
       userId = wsTokenData.userId;
       wsToken = wsTokenData.token;
 
       if (typeof wsToken !== 'string') {
-          console.error("WebSocket token is not a string after validation:", wsToken);
-          throw new Error("WebSocket token is invalid after fetch.");
+          console.error("[ConnectWS] WebSocket token is not a string after validation:", typeof wsToken);
+          throw new Error("WebSocket token is invalid after fetch (not a string).");
       }
-
+      console.log("[ConnectWS] UserID and wsToken acquired. Establishing WebSocket connection.");
       const wsUrl = `${config.WEBSOCKET_URL}/${userId}?token=${encodeURIComponent(wsToken!)}`;
       
       establishWebSocketConnection(wsUrl);
     })
     .catch(error => {
-      console.error("Error getting WebSocket token or connecting:", error);
+      console.error("[ConnectWS] Error during WebSocket token fetch or processing:", error.message, error);
       userId = null;
       wsToken = null;
       handleReconnection();
     });
 
   }).catch(error => {
-      console.error("Error getting Google token for WS connection:", error);
+      console.error("[ConnectWS] Critical error getting Google ID token for WS connection (outer getTokenResponse catch):", error.message, error);
+      // This path does not call handleReconnection, which could lead to a silent failure to connect if it occurs.
   });
 }
 
@@ -206,7 +227,7 @@ function establishWebSocketConnection(wsUrl: string): void {
     };
 
     socket.onclose = (event: CloseEvent): void => {
-      const reason = event.reason || 'No reason provided';
+      const reason = event.reason || 'No reason provided'
       console.warn(`WebSocket disconnected. Code: ${event.code}, Reason: ${reason.substring(0,100)}`);
       socket = null; 
       
@@ -484,7 +505,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ status: "Background received readiness, but no tab ID?" });
     }
     return true;
+  } else if (message.action === "authSucceededInPopup") {
+    console.log("[Background] Received 'authSucceededInPopup' message. Connecting WebSocket immediately.");
+    
+    // Get the token and initiate WebSocket connection
+    oauthManager.getTokenResponse().then(tokenResponse => {
+      if (tokenResponse?.id_token) {
+        console.log("[Background] Token found after popup auth. Connecting WebSocket...");
+        connectWebSocket();
+        sendResponse({ success: true, message: "WebSocket connection initiated" });
+      } else {
+        console.warn("[Background] Popup reported successful auth but no token found in background context.");
+        sendResponse({ success: false, message: "No token found" });
+      }
+    }).catch(error => {
+      console.error("[Background] Error getting token after popup auth:", error);
+      sendResponse({ success: false, error: error.message });
+    });
+    
+    return true; // Keep the sendResponse channel open for the async response
   } else if (message.action === "loginManually") {
+    console.log("[Background] Received 'loginManually' message. Initiating manual authentication."); // New log
     authenticateWithGoogle(true);
     sendResponse({ success: true, message: "Login process started" });
     return true;
@@ -492,15 +533,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     oauthManager.isAuthenticated().then(isAuthenticated => {
         if (isAuthenticated) {
              oauthManager.getTokenResponse().then(tokenResponse => {
-                let email = "Unknown";
-                if (tokenResponse?.id_token) {
-                    try {
-                        const payload = tokenResponse.id_token.split(".")[1];
-                        const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-                        email = decoded.email || email;
-                    } catch(e) { console.warn("Failed to parse ID token for email in getAuthStatus", e); }
-                }
-                sendResponse({ isAuthenticated: true, email: email });
+                const email = tokenResponse?.email || "Unknown";
+                const userId = tokenResponse?.userId || "Unknown"; // Optionally return userId too
+                sendResponse({ isAuthenticated: true, email: email, userId: userId });
+            }).catch(err => { // Add catch for getTokenResponse promise
+                console.error("Error getting token response for auth status:", err);
+                sendResponse({ isAuthenticated: true, email: "Error retrieving email", userId: "Error retrieving userId" });
             });
         } else {
             sendResponse({ isAuthenticated: false, lastFailedTimestamp: authFailedTimestamp });
@@ -512,15 +550,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.action === "explicitWsClose") {
     console.log("[Background] Explicit WebSocket close requested due to logout.");
+
+    // Always try to clear the ping interval, regardless of socket state.
+    // This ensures any active ping interval is stopped during logout.
+    if (pingIntervalId) {
+      clearInterval(pingIntervalId);
+      pingIntervalId = null;
+      console.log("[Background] Cleared ping interval due to explicit close request.");
+    }
+
     if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
       console.log("[Background] Closing active WebSocket connection intentionally.");
       intentionalDisconnect = true; // Set flag BEFORE closing
       socket.close(1000, "User logged out"); 
       socket = null; 
-      if (pingIntervalId) {
-        clearInterval(pingIntervalId);
-        pingIntervalId = null;
-      }
+      // pingIntervalId is already cleared above
       sendResponse({ status: "WebSocket close initiated" });
     } else {
       console.log("[Background] No active WebSocket to close or already closing/closed.");
@@ -580,21 +624,30 @@ chrome.tabs.onUpdated.addListener(
 
 async function initializeConnectionOnStartup() {
   console.log("[Startup] Checking initial authentication state...");
+  
+  // Register auth success callback to always connect WebSocket on successful auth
+  oauthManager.onAuthSuccess((idToken) => {
+    console.log("[Startup] Auth success callback triggered with valid token. Initiating WebSocket connection...");
+    connectWebSocket();
+  });
+  
   try {
     const isAuthenticated = await oauthManager.isAuthenticated();
     if (isAuthenticated) {
-      console.log("[Startup] User is already authenticated. Initiating WebSocket connection...");
-      connectWebSocket(); // Connect WebSocket if already authenticated
+      console.log("[Startup] User is already authenticated. WebSocket connection will be initiated by auth callback.");
+      // No need to explicitly call connectWebSocket() - the callback will handle it
     } else {
-      console.log("[Startup] User is not authenticated. Attempting to refresh session immediately...");
-      // Attempt to get/refresh the ID token.
-      // getIdToken will try backend refresh first, then interactive if necessary.
-      const newIdToken = await oauthManager.getIdToken();
-      if (newIdToken) {
-        console.log("[Startup] Session refreshed successfully. Initiating WebSocket connection...");
-        connectWebSocket(); // Connect WebSocket after successful refresh
-      } else {
-        console.log("[Startup] Session could not be refreshed automatically. Waiting for manual login or periodic check.");
+      console.log("[Startup] User is not authenticated. Attempting to refresh session immediately (silently)...");
+      try {
+        const newIdToken = await oauthManager.getIdToken(false);
+        if (!newIdToken) {
+          // This will be hit if getIdToken(false) returns null
+          console.log("[Startup] Silent authentication/refresh not possible (returned null). User needs to log in manually. Extension will wait.");
+        }
+        // If newIdToken exists, the auth success callback will handle connecting the WebSocket
+      } catch (error: any) {
+        // This catch block will now only handle unexpected errors from getIdToken
+        console.error("[Startup] Unexpected error during initial silent authentication/refresh attempt:", error.message, error.stack);
       }
     }
   } catch (error: any) { 

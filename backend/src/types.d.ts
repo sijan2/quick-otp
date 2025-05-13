@@ -26,6 +26,10 @@ interface Env {
   GOOGLE_API_KEY?: string;           // Gemini API Key (if using Gemini)
   GEMINI_MODEL_NAME?: string;        // Optional: Gemini model name override
   GEMINI_ENDPOINT?: string;          // Optional: Gemini endpoint override
+
+  // Vars for Pub/Sub JWT validation
+  // GOOGLE_PUBSUB_JWT_AUDIENCE is already defined
+  PUBSUB_SERVICE_ACCOUNT_EMAIL?: string; // Optional: Email of the SA used for the push subscription for an extra check
 }
 
 interface TokenData {

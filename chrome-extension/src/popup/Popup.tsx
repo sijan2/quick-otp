@@ -146,6 +146,15 @@ const Popup: React.FC = () => {
     setMoveToTrash(false); // Reset on login attempt
     try {
       await oauthManager.login();
+      console.log("Login successful, notifying background script to trigger its auth callbacks");
+      chrome.runtime.sendMessage({ action: "authSucceededInPopup" }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.warn("Failed to notify background script of successful auth:", chrome.runtime.lastError.message);
+        } else {
+          console.log("Background script notified of successful auth:", response);
+        }
+      });
+      
       await checkLoginStatusAndLoadData(); 
     } catch (error: any) {
       console.error("Login initiation failed:", error.message)
