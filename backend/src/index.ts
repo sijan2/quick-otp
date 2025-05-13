@@ -683,7 +683,7 @@ router.get('/api/get-user-preferences', async (request: Request, env: Env): Prom
 
     // Return relevant preferences
     const preferences = {
-        moveToTrash: tokenData.moveToTrash ?? false // Default to false if undefined
+        moveToTrash: tokenData.moveToTrash ?? true // Default to true if undefined
         // Add other preferences here in the future if needed
     };
 

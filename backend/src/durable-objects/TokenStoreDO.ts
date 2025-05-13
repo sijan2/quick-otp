@@ -137,7 +137,7 @@ export class TokenStoreDO extends DurableObject<Env> {
         otpFilterId: eotpFilterId === undefined ? null : eotpFilterId,
         isGmailAutomationSetup: eisGmailAutomationSetup === undefined ? false : eisGmailAutomationSetup,
         encryptedIdToken: existingTokenData?.encryptedIdToken === undefined ? encryptedIdToken : (encryptedIdToken ?? existingTokenData.encryptedIdToken), // Preserve if not newly provided, else use new one
-        moveToTrash: emoveToTrash === undefined ? false : emoveToTrash
+        moveToTrash: emoveToTrash === undefined ? true : emoveToTrash
       };
 
       await this.ctx.storage.put(`user:${userId}`, tokenData);

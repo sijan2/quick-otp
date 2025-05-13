@@ -5,6 +5,7 @@ import { Button, buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { listLabels, getWatchedLabels, updateWatchedLabels, stopCurrentWatch } from "@/lib/setup"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Switch } from "@/components/ui/switch"
 import { Label as UILabel } from "@/components/ui/label"
 
 interface Label {
@@ -374,10 +375,10 @@ const Popup: React.FC = () => {
                <UILabel htmlFor="moveToTrashToggle" className="text-xs font-medium text-gray-700 flex-grow cursor-pointer">
                  Automatically move OTP emails to Trash
                </UILabel>
-               <Checkbox 
+               <Switch 
                  id="moveToTrashToggle"
                  checked={moveToTrash}
-                 onCheckedChange={(checkedState: boolean) => handleMoveToTrashToggle(checkedState)}
+                 onCheckedChange={handleMoveToTrashToggle}
                  disabled={isLoadingPreferences || !sessionToken}
                  aria-label="Automatically move OTP emails to Trash"
                />
