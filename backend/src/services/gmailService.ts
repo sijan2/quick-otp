@@ -608,6 +608,7 @@ function getOtpFilterQuery(): string {
 				"signed up for a new account or requested a password or email change",
 				"You've requested to login with your email",
 				"You've requested to change your email address",
+				"enter the 6-digit code in the original window "
     ];
     const uniquePhrases = [...new Set(phrases.map(p => p.toLowerCase().trim()))];
     return uniquePhrases.map(phrase => `"${phrase}"`).join(' OR ');
