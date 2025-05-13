@@ -17,6 +17,7 @@ let authFailedTimestamp = 0
 const AUTH_RETRY_COOLDOWN = 60000 // 1 minute cooldown between auth attempts
 let manualAuthRequested = false // Flag to track if auth was manually requested
 let intentionalDisconnect = false // New flag
+let isConnectWebSocketAttemptInProgress = false; // New flag to track connection attempts
 
 let messageQueue: Message[] = []
 const contentScriptReadyTabs = new Set<number>()
@@ -29,37 +30,34 @@ let wsToken: string | null = null
 // Periodically check WebSocket connection (keep)
 setInterval(async () => {
   try {
-    const tokenResponse = await oauthManager.getTokenResponse(); // Get the raw token response first
+    const tokenResponse = await oauthManager.getTokenResponse(); 
 
     if (!tokenResponse || !tokenResponse.id_token) {
-      // NO local token AT ALL. User is properly logged out.
-      // The periodic check should NOT try to initiate a new login.
       console.log("Periodic check: No local token response. User is logged out. Waiting for manual login.");
-      if (socket && socket.readyState === WebSocket.OPEN) { // If socket is somehow open, close it.
+      if (socket && socket.readyState === WebSocket.OPEN) { 
           console.warn("Periodic check: Closing WebSocket as user is logged out.");
           intentionalDisconnect = true;
           socket.close(1001, "User logged out, periodic check.");
-          socket = null;
+          // socket = null; // onclose will handle
       }
-      return; // Exit the periodic check for auth purposes
+      return; 
     }
 
-    // Token response exists, now check if it's authenticated (not expired by more than 5 min buffer)
-    // oauthManager.isAuthenticated() will internally use the tokenResponse again, which is fine.
     const isAuthenticated = await oauthManager.isAuthenticated(); 
 
     if (!isAuthenticated) {
-      // Token exists but is expired/invalid. THIS is when we attempt refresh.
       console.log("Periodic check: User not authenticated or id_token expired/nearing expiry. Attempting to refresh id_token...");
       try {
-        const newIdToken = await oauthManager.getIdToken(); // This will try backend refresh, then interactive
+        const newIdToken = await oauthManager.getIdToken(); 
         if (newIdToken) {
-          console.log("Periodic check: id_token refreshed successfully.");
+          console.log("Periodic check: id_token refreshed successfully. Clearing old wsToken to fetch a new one.");
+          userId = null; // Force new wsToken fetch
+          wsToken = null; // Force new wsToken fetch
           if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
             console.log("Periodic check: Closing existing WebSocket to reconnect with new token.");
             intentionalDisconnect = true; 
             socket.close(1000, "Reconnecting after id_token refresh");
-            socket = null; 
+            // socket = null; // onclose will handle
           }
           console.log("Periodic check: Ensuring WebSocket is connected with new token.");
           connectWebSocket(); 
@@ -69,7 +67,7 @@ setInterval(async () => {
              console.warn("Periodic check: Closing WebSocket as authentication refresh failed.");
              intentionalDisconnect = true;
              socket.close(1008, "Authentication token expired and refresh failed");
-             socket = null;
+             // socket = null; // onclose will handle
           }
         }
       } catch (refreshError: any) {
@@ -78,17 +76,16 @@ setInterval(async () => {
             console.warn("Periodic check: Closing WebSocket due to error in authentication refresh.");
             intentionalDisconnect = true;
             socket.close(1008, "Authentication token refresh error");
-            socket = null;
+            // socket = null; // onclose will handle
         }
       }
     } else {
-      // Authenticated and id_token is fine. Check WebSocket itself.
       if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
         console.warn("Periodic check: WebSocket disconnected (while id_token is valid), attempting to reconnect...");
         connectWebSocket(); 
       }
     }
-  } catch (authErr: any) { // Error from oauthManager.getTokenResponse() or .isAuthenticated() itself
+  } catch (authErr: any) { 
     console.error("Error in periodic WS check (outer try-catch):", authErr.message);
   }
 }, 60000); // Keep interval
@@ -126,75 +123,88 @@ function connectWebSocket(): void {
     console.log("[ConnectWS] WebSocket already open or connecting. Aborting new connection attempt.");
     return;
   }
-  console.log("[ConnectWS] Attempting to connect WebSocket (current socket state: " + (socket ? getWebSocketStateString(socket.readyState) : 'null') + ").");
+  if (isConnectWebSocketAttemptInProgress) {
+    console.log("[ConnectWS] Another connectWebSocket attempt is already in progress. Aborting.");
+    return;
+  }
+  console.log("[ConnectWS] Attempting to connect WebSocket. Current socket state: " + (socket ? getWebSocketStateString(socket.readyState) : 'null') + ". Existing wsToken: " + (wsToken ? 'yes' : 'no'));
+  isConnectWebSocketAttemptInProgress = true;
 
-  oauthManager.getTokenResponse().then(tokenResponse => {
-    if (!tokenResponse?.id_token) {
-      console.warn("[ConnectWS] Cannot connect WebSocket: Google ID token not available from getTokenResponse(). Auth might have failed or token not stored.");
+  oauthManager.getTokenResponse().then(googleTokenResponse => {
+    if (!googleTokenResponse?.id_token) {
+      console.warn("[ConnectWS] Cannot connect: Google ID token not available. Auth might have failed or token not stored.");
+      isConnectWebSocketAttemptInProgress = false;
       return; 
     }
-    const googleIdToken = tokenResponse.id_token;
-    console.log("[ConnectWS] Google ID token retrieved for WebSocket connection (first 10 chars):", googleIdToken.substring(0,10));
+    const googleIdToken = googleTokenResponse.id_token;
 
-    console.log("[ConnectWS] Fetching WebSocket token from backend: ", `${config.BACKEND_URL}/auth/ws-token`);
-    fetch(`${config.BACKEND_URL}/auth/ws-token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ idToken: googleIdToken })
-    })
-    .then(response => {
-      console.log("[ConnectWS] Response received from /auth/ws-token. Status:", response.status);
-      if (!response.ok) {
-        // Attempt to read error body for more context
-        return response.text().then(text => {
-          throw new Error(`Failed to get WebSocket token: ${response.status} ${response.statusText}. Body: ${text.substring(0, 200)}`);
-        }).catch(() => { // Fallback if .text() fails
-          throw new Error(`Failed to get WebSocket token: ${response.status} ${response.statusText}. Could not read error body.`);
-        });
-      }
-      return response.json();
-    })
-    .then(wsTokenData => { 
-      console.log("[ConnectWS] WebSocket token data received from backend:", wsTokenData ? {userId: wsTokenData.userId, tokenExists: !!wsTokenData.token} : 'null/undefined');
-      if (!wsTokenData || !wsTokenData.token || !wsTokenData.userId) {
-          console.error("[ConnectWS] Invalid or incomplete response from /auth/ws-token endpoint. Data:", wsTokenData);
-          throw new Error("Invalid response from /auth/ws-token endpoint. Token or userId missing.");
-      }
-      userId = wsTokenData.userId;
-      wsToken = wsTokenData.token;
+    if (userId && wsToken) {
+      console.log(`[ConnectWS] Attempting to reuse existing userId (${userId ? userId.substring(0,5) : 'null'}) and wsToken.`);
+      const wsUrl = `${config.WEBSOCKET_URL}/${userId}?token=${encodeURIComponent(wsToken)}`;
+      establishWebSocketConnection(wsUrl, true); // true indicates token reuse
+    } else {
+      console.log("[ConnectWS] No existing wsToken or userId, or they were cleared. Fetching new WebSocket token from backend.");
+      fetch(`${config.BACKEND_URL}/auth/ws-token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ idToken: googleIdToken })
+      })
+      .then(response => {
+        console.log("[ConnectWS] Response received from /auth/ws-token. Status:", response.status);
+        if (!response.ok) {
+          return response.text().then(text => {
+            throw new Error(`Failed to get WebSocket token: ${response.status} ${response.statusText}. Body: ${text.substring(0, 200)}`);
+          }).catch(() => { 
+            throw new Error(`Failed to get WebSocket token: ${response.status} ${response.statusText}. Could not read error body.`);
+          });
+        }
+        return response.json();
+      })
+      .then(wsTokenData => { 
+        console.log("[ConnectWS] WebSocket token data received from backend:", wsTokenData ? {userId: wsTokenData.userId, tokenExists: !!wsTokenData.token} : 'null/undefined');
+        if (!wsTokenData || !wsTokenData.token || !wsTokenData.userId) {
+            console.error("[ConnectWS] Invalid or incomplete response from /auth/ws-token. Data:", wsTokenData);
+            isConnectWebSocketAttemptInProgress = false; 
+            throw new Error("Invalid response from /auth/ws-token. Token or userId missing.");
+        }
+        userId = wsTokenData.userId;
+        wsToken = wsTokenData.token;
 
-      if (typeof wsToken !== 'string') {
-          console.error("[ConnectWS] WebSocket token is not a string after validation:", typeof wsToken);
-          throw new Error("WebSocket token is invalid after fetch (not a string).");
-      }
-      console.log("[ConnectWS] UserID and wsToken acquired. Establishing WebSocket connection.");
-      const wsUrl = `${config.WEBSOCKET_URL}/${userId}?token=${encodeURIComponent(wsToken!)}`;
-      
-      establishWebSocketConnection(wsUrl);
-    })
-    .catch(error => {
-      console.error("[ConnectWS] Error during WebSocket token fetch or processing:", error.message, error);
-      userId = null;
-      wsToken = null;
-      handleReconnection();
-    });
-
+        if (typeof wsToken !== 'string') {
+            console.error("[ConnectWS] WebSocket token is not a string after validation:", typeof wsToken);
+            isConnectWebSocketAttemptInProgress = false;
+            throw new Error("WebSocket token is invalid after fetch (not a string).");
+        }
+        console.log("[ConnectWS] New UserID and wsToken acquired. Establishing WebSocket connection.");
+        const wsUrl = `${config.WEBSOCKET_URL}/${userId}?token=${encodeURIComponent(wsToken!)}`;
+        establishWebSocketConnection(wsUrl, false); // false indicates not reusing (new) token
+      })
+      .catch(error => {
+        console.error("[ConnectWS] Error during WebSocket token fetch or processing:", error.message, error);
+        userId = null; 
+        wsToken = null;
+        isConnectWebSocketAttemptInProgress = false;
+        handleReconnection();
+      });
+    }
   }).catch(error => {
       console.error("[ConnectWS] Critical error getting Google ID token for WS connection (outer getTokenResponse catch):", error.message, error);
-      // This path does not call handleReconnection, which could lead to a silent failure to connect if it occurs.
+      isConnectWebSocketAttemptInProgress = false;
+      // If we can't get Google ID, reconnection is unlikely to succeed without re-auth.
   });
 }
 
-function establishWebSocketConnection(wsUrl: string): void {
+function establishWebSocketConnection(wsUrl: string, isReusingToken: boolean): void {
   try {
     socket = new WebSocket(wsUrl);
-    intentionalDisconnect = false; // Reset flag on new connection attempt
+    intentionalDisconnect = false; 
 
     socket.onopen = (): void => {
-      console.log("WebSocket connected successfully");
+      console.log(`WebSocket connected successfully ${isReusingToken ? '(reused token)' : '(new token)'}`);
       reconnectAttempts = 0;
+      isConnectWebSocketAttemptInProgress = false; 
       startWebSocketPing();
     };
 
@@ -224,21 +234,40 @@ function establishWebSocketConnection(wsUrl: string): void {
 
     socket.onerror = (error: Event): void => {
       console.error("WebSocket error:", error);
+      // isConnectWebSocketAttemptInProgress will be reset in onclose, which usually follows onerror
     };
 
     socket.onclose = (event: CloseEvent): void => {
       const reason = event.reason || 'No reason provided'
       console.warn(`WebSocket disconnected. Code: ${event.code}, Reason: ${reason.substring(0,100)}`);
       socket = null; 
+      isConnectWebSocketAttemptInProgress = false; // Connection attempt is over
       
       if (intentionalDisconnect) {
         console.log("WebSocket closed intentionally (e.g., due to logout). No reconnection attempt.");
-        intentionalDisconnect = false; // Reset flag
+        intentionalDisconnect = false; 
       } else {
-        handleReconnection(); // Attempt to reconnect only if not intentional
+        // If we were reusing a token and the connection closed unexpectedly,
+        // the token might be invalid. Clear it to force a new fetch on next attempt.
+        // Specific close codes (e.g., 1008, 4000-4999) could make this more precise.
+        if (isReusingToken && (event.code === 1008 || (event.code >= 4000 && event.code <= 4999) || event.code === 1002 || event.code === 1003 || event.code === 1006 || event.code === 1011)) {
+            console.log(`[ConnectWS] WebSocket closed (code ${event.code}) after reusing token. Clearing token for next attempt.`);
+            userId = null;
+            wsToken = null;
+        }
+        handleReconnection(); 
       }
     };
-  } catch (error) { console.error("Error creating WebSocket:", error); handleReconnection(); }
+  } catch (error) { 
+    console.error("Error creating WebSocket:", error); 
+    isConnectWebSocketAttemptInProgress = false;
+    if (isReusingToken) {
+        console.log("[ConnectWS] Error creating WebSocket while reusing token. Clearing token.");
+        userId = null;
+        wsToken = null;
+    }
+    handleReconnection(); 
+  }
 }
 
 function handleReconnection(): void {
@@ -507,8 +536,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.action === "authSucceededInPopup") {
     console.log("[Background] Received 'authSucceededInPopup' message. Connecting WebSocket immediately.");
-    
-    // Get the token and initiate WebSocket connection
+    userId = null; // Force new wsToken fetch after fresh auth
+    wsToken = null; // Force new wsToken fetch after fresh auth
     oauthManager.getTokenResponse().then(tokenResponse => {
       if (tokenResponse?.id_token) {
         console.log("[Background] Token found after popup auth. Connecting WebSocket...");
@@ -625,9 +654,10 @@ chrome.tabs.onUpdated.addListener(
 async function initializeConnectionOnStartup() {
   console.log("[Startup] Checking initial authentication state...");
   
-  // Register auth success callback to always connect WebSocket on successful auth
   oauthManager.onAuthSuccess((idToken) => {
-    console.log("[Startup] Auth success callback triggered with valid token. Initiating WebSocket connection...");
+    console.log("[Startup] Auth success callback triggered with valid token. Clearing old wsToken and initiating WebSocket connection...");
+    userId = null; // Force new wsToken fetch
+    wsToken = null; // Force new wsToken fetch
     connectWebSocket();
   });
   
