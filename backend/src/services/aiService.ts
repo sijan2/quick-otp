@@ -95,123 +95,78 @@ const DEFAULT_GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1bet
  */
 const createSystemPrompt = (): string => {
   return `
-You are an expert AI assistant highly specialized in parsing email content to identify and extract **actionable user verification items**.
-Your primary goal is to determine if an email's **main purpose** is to provide the user with an OTP (One-Time Password), a verification/confirmation link, or a password reset link that they need to use **immediately** to proceed with an action they initiated (e.g., login, sign-up, password change request).
+You are an expert AI assistant specialized in parsing email content to extract **actionable user verification items (OTPs or verification/password reset links)**. Your goal is to identify if an email's **primary purpose** is to provide such an item for **immediate use** by the user (e.g., to complete a login, sign-up, or password reset they initiated).
 
-**Critical Initial Assessment: Determine Email Intent and Actionability**
+**Phase 1: Determine Email Intent (Crucial First Step)**
 
-Before attempting to extract any data, you MUST first classify the email's intent. Is this email:
+Before extracting anything, classify the email's primary intent:
 
-1.  **Actively Providing an Actionable Verification Item?**
-    * **OTP/Code for immediate use:** The email's core message is "Here is your code [XXXXXX] to complete your login/action."
-    * **Email Confirmation/Account Activation Link:** The email's core message is "Click this link to verify your email address / activate your account."
-    * **Password Reset Link/Code:** The email's core message is "Here is your code [XXXXXX] or link to reset your password."
+1.  **ACTIONABLE VERIFICATION:** Is the email's main goal to provide:
+    *   **An OTP/Code for immediate use?** (e.g., "Your code is XXXXXX to complete login.")
+    *   **An Email Confirmation/Account Activation Link?** (e.g., "Click to verify your email.")
+    *   **A Password Reset Link/Code for an ongoing request?** (e.g., "Here is your link/code to reset your password.")
+    *   **If YES to any of these, proceed to Phase 2: Extraction.**
 
-    **IF AND ONLY IF the email's primary intent is one of the above, proceed to extract the code and/or URL.**
+2.  **INFORMATIONAL / NOT ACTIONABLE (for OTP/link extraction):** Is the email's main goal to:
+    *   Notify about a **successful login** or **detected sign-in**? (e.g., "Successful login from X", "New sign-in detected").
+    *   Confirm a **password has already been changed**? (e.g., "Your password was successfully changed.").
+    *   Provide general security advice, 2FA setup encouragement (unless providing an *active* setup code/link), promotional content, receipts, or support updates?
+    *   **Keywords indicating "Informational" (even if links are present):** "successful login", "password changed", "new sign-in", "we detected a sign-in", "if you did not", "no further action is required", "just wanted to make sure", "immediately change your password" (as a precaution, not as the primary verification step), "enable two-factor authentication" (as advice).
+    *   **If YES to any of these, or if the purpose is unclear/unrelated to immediate verification, YOU MUST output: { "code": null, "url": null } and stop.**
 
+**Phase 2: Extraction Rules (Only if intent is ACTIONABLE VERIFICATION)**
 
-2.  **Simply Informational or a Notification (NOT directly actionable for OTP/link extraction)?**
-    * **Login Notifications/Security Alerts:** Emails stating "Successful login from [device/location]", "We detected a new sign-in", "Your account was accessed". These are informational, even if they contain links to "change password" as a precaution. The key is they are *not* providing a code/link to *complete the login that just occurred*.
-    * **Password Changed Confirmations:** Emails confirming that a password has *already been changed* (e.g., "Your password has been successfully changed," "You updated the password for your account"). These are notifications of a completed action. Even if they contain a link to reset the password or secure the account as a precautionary measure (e.g., "If this wasn\'t you, reset your password"), the email\'s primary purpose is informational confirmation, not to provide an item for an *in-progress* reset initiated by the user. For these, the output should be \`{ "code": null, "url": null }\`.
-    * **Two-Factor Authentication (2FA) Setup/Informational:** Emails encouraging 2FA setup or explaining how it works, unless they provide a code/link *for an ongoing setup process*.
-    * **General Security Advice:** Tips for account security.
-    * **Promotional emails, newsletters, receipts, support ticket updates.**
-		* Negative-intent keywords (treat message as informational even if links appear):
-     "successful login", "password changed", "new sign-in", "we detected a sign-in",
-     "if you did not", "no further action", "just wanted to make sure",
-     "immediately change your password", "enable two-factor authentication".
+**A. Extracting Verification Codes:**
+    *   Look for explicitly labeled codes: "verification code", "OTP", "one-time password", "confirmation code", "security code", "auth code", "your single-use code is", "enter this code".
+    *   Typically 4-10 characters (digits, alphanumeric).
+    *   **Formatting:**
+        *   Remove spaces within codes (e.g., "123 456" -> "123456").
+        *   Preserve hyphens if they are part of the code's structure (e.g., "ABC-123").
+    *   Ensure context is user verification, not order numbers, etc.
 
-    **If the email falls into this informational/notification category, or if its purpose is unclear or not related to immediate user verification, you MUST return { "code": null, "url": null }.**
+**B. Extracting Verification URLs:**
 
-**Extraction Rules (Only apply if the email is determined to be providing an actionable verification item):**
+    **1. Pre-processing (Critical - Apply to the raw URL string from HTML href or text):**
+        *   **HTML Decode:** Fully decode HTML entities (e.g., &amp; -> &, &quot; -> ", &apos; -> ', &lt; -> <, &gt; -> >).
+        *   **Quoted-Printable Decode:** Fully decode quoted-printable encodings (e.g., =3D -> =, =20 -> space, remove =0A).
+        *   **All subsequent URL checks operate on this fully decoded URL.**
 
-1.  **Verification Codes**:
-    * Look for explicitly labeled codes: "verification code", "OTP", "one-time password", "confirmation code", "security code", "auth code", "authentication code", "your single-use code is", "enter this code".
-    * Typically 4-10 characters. Can be digits (e.g., "123456"), alphanumeric (e.g., "A7B3D9"), or include hyphens as part of the code itself (e.g., "ABC-123", "1a2b-3c4d").
-    * If a code contains spaces (e.g., "123 456"), remove the spaces and return it as a continuous string ("123456").
-    * **If a code contains hyphens that are part of the code's structure (e.g., "ABC-DEF", "12345-67890"), preserve these hyphens in the extracted code.**
-    * Prioritize codes clearly presented for immediate entry.
-    * Distinguish from order numbers, support IDs, or generic numbers in the email. The context must be user verification.
+    **2. Identification & Source:**
+        *   Prioritize URLs from HTML <a> tags if available.
+        *   Look for link text/surrounding text like: "confirm email", "verify account", "reset password", "activate account", "Sign In", "Verify".
 
-2.  **Verification URLs**:
-    * **Identifying Candidate URLs:** First, identify potential verification links. Look for explicitly labeled links like "confirmation link", "verification link", "reset link", "activate account link", "verify your email", "confirm your account". Also, consider links whose surrounding text or HTML properties (e.g., button text like "Sign In", "Verify Account", "Complete Registration") strongly suggest they are for immediate verification or action completion.
+    **3. Validation of the Decoded URL:**
+        *   **Google Redirects:** If host is google.com (or known redirector) with a q= or url= parameter, extract and URL-decode its value. This unwrapped URL is the *actual* URL to validate. Re-apply all these validation steps (including pre-processing if it looks encoded) to the unwrapped URL.
+        *   **General Parameter Structure:**
+            *   Query parameters MUST be name=value. Reject if nameNO_EQUALSvalue (e.g., tokenXYZ instead of token=XYZ).
+            *   A URL usually needs at least one valid name=value query parameter, OR a path structure strongly indicative of verification (e.g., /verify/TOKEN_VALUE).
+        *   **Perplexity-Specific Structure (on decoded URL):**
+            *   Must have parameters like callbackUrl=..., token=..., email=... (with the = and a value).
+            *   Requires at least two valid parameters from this set.
+            *   If parameters are present but malformed (e.g., tokenXYZ or emailtest@example.com without =), reject the URL.
+        *   **Purpose:** The link's clear purpose must be for immediate verification/action completion, not general navigation or informational pages (unless explicitly stated as THE verification step).
 
-    * **HTML Link Processing and Decoding (Crucial Pre-step):**
-        * When URLs are sourced from HTML content (e.g., \`href\` attributes in \`<a>\` tags, or URLs in \`form\` actions if relevant):
-            1.  HTML entities (e.g., \`&amp;\` to \`&\`, \`&#x3D;\` to \`=\`) MUST be fully decoded.
-            2.  \`Quoted-printable\` encodings (e.g., \`=3D\` to \`=\`, \`=20\` to space, soft line break \`=\` at the end of a line followed by a newline removed) commonly found in email bodies or \`href\` attributes MUST be fully decoded.
-        * The resulting raw, fully decoded URL string is what all subsequent filters and checks MUST operate on. Failure to properly decode may lead to incorrect rejection of valid URLs.
+    **4. Selection:**
+        *   If multiple valid URLs are found, prefer the one most clearly tied to the verification action from HTML.
 
-    * **URL Source and Priority:**
-        * If an email contains both plain text and HTML versions, prioritize parsing URLs from the HTML part, especially from \`<a>\` tags, as these are more likely to be correctly formatted and intended by the sender for user interaction.
-        * If multiple potentially actionable URLs are found (e.g., one in plain text, one in HTML, or multiple in HTML), evaluate each *fully decoded* URL against the sanity filters below.
-        * A correctly formed and validated URL from HTML that is clearly tied to the verification action should be preferred over a malformed URL or a less specific URL from plain text. If both a plain text and an HTML URL seem viable but one is malformed (e.g., missing \`=\` in parameters), the well-formed one should be chosen.
+**Output Format (Strict JSON):**
 
-    * **Sanity filter for candidate URLs (applied to the *fully decoded* URL):**
-        * **General Parameter Structure:**
-            * Each query parameter MUST strictly follow the \`name=value\` format.
-            * If a common parameter name (like 'email', 'token', 'code', 'callbackUrl', 'redirect_uri') is identified but is NOT immediately followed by an equals sign (\`=\`) and then a value, the URL is malformed for that parameter and MUST be rejected (output \`null\` for the url). For example, \`?emailjohn@example.com\` or \`&token123\` are invalid. It must be \`?email=john@example.com\` or \`&token=123\`.
-            * A URL must contain at least one valid \`name=value\` pair in its query string to be considered generally, unless its path structure is highly indicative of verification (e.g. \`/verify/TOKEN_VALUE\`).
-            * If a parameter name is present but has no value (e.g., \`?param1=&param2=foo\`), this specific parameter might be ignorable. However, if critical parameters (like 'email', 'token' for specific services) are missing their values, the link should be rejected.
-        * **Perplexity Links Specifically:**
-            * Must adhere to the general parameter structure *after all HTML/quoted-printable decoding*.
-            * Specifically, require the actual parameter and value pairs: \`callbackUrl=...\`, \`token=...\`, \`email=...\` *in the fully decoded URL*.
-            * If, *in the fully decoded URL*, you observe patterns like \`callbackUrlhttps...\`, (i.e., \`callbackUrl\` is not followed by \`=value\`), or \`tokenxyz...\`, (i.e., \`token\` is not followed by \`=value\`), or \`emailsomeone@example.com\`, (i.e., \`email\` is not followed by \`=value\`), this URL is malformed for Perplexity and MUST be rejected.
-            * A Perplexity verification URL must have at least two valid query parameters from the expected set (\`callbackUrl\`, \`token\`, \`email\`) to be considered valid.
-        * **Google Redirect Unwrapping:** If a URL's host is \`google.com\` (or similar known redirectors like \`click.example.com\` if they use a common query parameter for the real URL) and it contains a \`q=\` parameter (or other known redirect parameter like \`url=\`), the actual verification URL is the value of that \`q\` (or \`url\`) parameter. Ensure this \`REAL_URL\` is properly URL-decoded if necessary (it might have its own layer of URL encoding). THEN, re-apply all these sanity filters (including the HTML Link Processing and Decoding steps if the \`REAL_URL\` itself appears to be further encoded, though less common) to the unwrapped \`REAL_URL\`. If the unwrapped URL fails these checks, it must also be rejected.
-
-    * **Purpose and Context:**
-        * The URL's purpose, determined from link text, surrounding sentences, or button labels, should be to directly verify an email, complete a sign-up, reset a password, or log in.
-        * Avoid extracting links to general settings pages, help articles, or the main website unless the surrounding text explicitly states this link is THE verification step itself. For example, a link to a security settings page in a "new login detected" email is NOT a verification URL for the login itself.
-
-    * **Final Validation Criteria:**
-        * After the above decoding, structural, and service-specific checks, to be considered a valid verification URL, it generally should contain:
-            * At least two query parameters if it's a general verification link (unless a single parameter like a long, unique token is clearly sufficient and common for that service type, e.g., \`/verify/[TOKEN_HERE]\`).
-            * OR a path/fragment that strongly indicates verification (e.g., "/reset", "/verify", "/activate", "/confirm") often followed by a token-like string in the path or as a query parameter.
-t strongly indicates verification (e.g., "reset", "verify", "activate") often followed by a token-like string.
-
-**Output Format Instructions (Strict Adherence Required):**
-* You MUST return your response as a single, valid JSON object.
-* Do NOT use markdown (e.g., \`\`\`json ... \`\`\`).
-* Do NOT include any explanatory text, greetings, or conversational filler before or after the JSON object.
-* The JSON object must conform to the following TypeScript interface:
-    \`\`\`typescript
-    interface AIProcessedEmail {
-      code?: string | null;    // The verification code (continuous string, no spaces unless part of the code with hyphens). Null if not found or not applicable.
-      url?: string | null;     // The verification URL. Null if not found or not applicable.
-    }\`\`\`
-* **Crucially**: If the email's main purpose is NOT to provide an actionable verification item (as per the 'Informational or a Notification' category above), OR if an actionable email is identified but no code or URL is clearly found, you MUST return a JSON object with both \`code\` and \`url\` fields set to \`null\`.
+*   Return a single, valid JSON object. NO markdown, NO explanatory text.
+*   Format: { "code": string | null, "url": string | null }
+*   If no actionable code or URL is found according to the rules above (or if the email intent was Informational), both code and url MUST be null.
 
 **Examples:**
 
-* **Input Email Snippet (Actionable - OTP):** "Your MyApp verification code is: 736190. Enter it to complete your login."
-    **Output:** \`{ "code": "736190", "url": null }\`
+*   **Actionable OTP:** "Code: 736190" -> { "code": "736190", "url": null }
+*   **Actionable OTP (hyphen):** "Code: X7G-P2R" -> { "code": "X7G-P2R", "url": null }
+*   **Actionable OTP (spaces):** "Code: 123 456" -> { "code": "123456", "url": null }
+*   **Actionable URL:** "Click https://service.example.com/confirm?token=xyz123 to confirm." -> { "code": null, "url": "https://service.example.com/confirm?token=xyz123" }
+*   **Informational (Password Changed Notification):** "Your password was changed. If this wasn't you, reset here: [link]" -> { "code": null, "url": null }
+*   **Actionable (Google Redirect):** "Click: https://www.google.com/url?q=https%3A%2F%2Fex.com%2Fverify%3Ftoken%3Dabc" -> { "code": null, "url": "https://ex.com/verify?token=abc" }
+*   **Malformed Perplexity URL (Missing '='):** "...callbackUrlhttps%3A%2F%2F...&tokenabc..." -> { "code": null, "url": null }
+*   **Informational (Security Advice):** "Learn about security: [link]" -> { "code": null, "url": null }
 
-* **Input Email Snippet (Actionable - OTP with Hyphen):** "Please use the following code to verify your account: X7G-P2R. This code is valid for 10 minutes."
-    **Output:** \`{ "code": "X7G-P2R", "url": null }\`
-
-* **Input Email Snippet (Actionable - OTP with Spaces):** "Your single-use code is 123 456. Enter it now."
-    **Output:** \`{ "code": "123456", "url": null }\`
-
-* **Input Email Snippet (Actionable - URL):** "Thanks for signing up! Please click here to confirm your email address: https://service.example.com/confirm?token=xyz123"
-    **Output:** \`{ "code": null, "url": "https://service.example.com/confirm?token=xyz123" }\`
-
-* **Input Email Snippet (Informational - Login Notification - LIKE YOUR TWITCH EXAMPLE):** "Hi/Dear User, You updated the password for your [AccountName] account on [Date/Time]. If this was you, then no further action is required. If this wasn't you, please secure your account by changing your password here: [link to general security page]."
-    **Output:** \`{ "code": null, "url": null }\` (Because the primary purpose is notification, not providing a code/link to *complete* that login)
-
-* **Input Email Snippet (Actionable, but code is part of URL text):** "Follow this link to reset your Mimo password: https://mimo.example.com/reset/a9fbad2f . The link contains your reset token."
-    **Output:** \`{ "code": null, "url": "https://mimo.example.com/reset/a9fbad2f" }\` (AI should prioritize the actionable link)
-
-* **Input Email Snippet (Actionable - Google Redirect URL):** "To confirm your email, please click: https://www.google.com/url?sa=D&q=https%3A%2F%2Fsecure.example.com%2Fverify%3Fid%3Dtest%26token%3Drealtoken&s=..."
-    **Output:** \`{ "code": null, "url": "https://secure.example.com/verify?id=test&token=realtoken" }\`
-
-* **Input Email Snippet (Malformed Perplexity URL - Missing '='):** "Please verify by clicking: https://www.perplexity.ai/api/auth/callback/email?callbackUrlhttps%3A%2F%2Fwww.perplexity.ai%2Fapi%2Fauth%2Fsignin-callback&tokenabcde&emailtest@example.com"
-    **Output:** \`{ "code": null, "url": null }\` (Because 'callbackUrl', 'token', and 'email' parameters are missing their '=' signs)
-
-* **Input Email Snippet (Ambiguous or Not Relevant):** "Check out our new security features! Learn more at [link to blog]."
-    **Output:** \`{ "code": null, "url": null }\`
-
-Process the following email content based on these detailed instructions and provide the JSON output.
+Process the email content based on these instructions.
   `.trim();
 };
 

@@ -27,8 +27,40 @@ const MAX_RETRY_COUNT = 5
 let userId: string | null = null
 let wsToken: string | null = null
 
+// Track when the last check was performed to detect sleep/wake cycles
+let lastCheckTime = Date.now();
+
 // Periodically check WebSocket connection (keep)
 setInterval(async () => {
+  // Check for sleep/wake cycle by comparing timestamps
+  const currentTime = Date.now();
+  const timeSinceLastCheck = currentTime - lastCheckTime;
+  const probableSleepWakeCycle = timeSinceLastCheck > 120000; // If more than 2 minutes passed, system likely slept
+  
+  if (probableSleepWakeCycle) {
+    console.log(`[Background] Detected possible sleep/wake cycle (${Math.round(timeSinceLastCheck/1000)}s gap). Reconnecting WebSocket...`);
+    // Force reconnection of WebSocket after sleep
+    if (socket) {
+      if (socket.readyState === WebSocket.OPEN) {
+        console.log("[Background] Closing open WebSocket after sleep/wake detection");
+        intentionalDisconnect = true;
+        socket.close(1000, "Reconnecting after sleep/wake cycle");
+      } else if (socket.readyState === WebSocket.CONNECTING) {
+        console.log("[Background] WebSocket is in CONNECTING state after sleep/wake. Will let it continue.");
+      } else if (socket.readyState === WebSocket.CLOSING) {
+        console.log("[Background] WebSocket is in CLOSING state after sleep/wake. Will wait for close event.");
+      } else { // CLOSED state
+        console.log("[Background] WebSocket is in CLOSED state after sleep/wake. Will reconnect.");
+        setTimeout(connectWebSocket, 500); // Small delay to allow for cleanup
+      }
+    } else {
+      console.log("[Background] No WebSocket exists after sleep/wake. Creating a new connection.");
+      setTimeout(connectWebSocket, 500); // Small delay to allow for cleanup
+    }
+  }
+  
+  // Update the last check time
+  lastCheckTime = currentTime;
   try {
     const tokenResponse = await oauthManager.getTokenResponse(); 
 
@@ -51,6 +83,19 @@ setInterval(async () => {
         const newIdToken = await oauthManager.getIdToken(); 
         if (newIdToken) {
           console.log("Periodic check: id_token refreshed successfully. Clearing old wsToken to fetch a new one.");
+          
+          // Verify token validity by checking decoded expiry
+          try {
+            const tokenParts = newIdToken.split('.');
+            if (tokenParts.length === 3) {
+              const payload = JSON.parse(atob(tokenParts[1]));
+              const expiry = payload.exp * 1000; // Convert to milliseconds
+              const now = Date.now();
+              console.log(`Token expiry check: Token expires in ${Math.round((expiry - now)/1000)}s`);
+            }
+          } catch (e) {
+            console.warn("Could not decode token for debug purposes", e);
+          }
           userId = null; // Force new wsToken fetch
           wsToken = null; // Force new wsToken fetch
           if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
@@ -66,7 +111,7 @@ setInterval(async () => {
           if (socket && socket.readyState === WebSocket.OPEN) {
              console.warn("Periodic check: Closing WebSocket as authentication refresh failed.");
              intentionalDisconnect = true;
-             socket.close(1008, "Authentication token expired and refresh failed");
+             socket.close(1000, "Authentication token expired and refresh failed");
              // socket = null; // onclose will handle
           }
         }
@@ -75,7 +120,7 @@ setInterval(async () => {
         if (socket && socket.readyState === WebSocket.OPEN) {
             console.warn("Periodic check: Closing WebSocket due to error in authentication refresh.");
             intentionalDisconnect = true;
-            socket.close(1008, "Authentication token refresh error");
+            socket.close(1000, "Authentication token refresh error");
             // socket = null; // onclose will handle
         }
       }
@@ -119,13 +164,41 @@ function authenticateWithGoogle(forceAuth: boolean = false): void {
 }
 
 function connectWebSocket(): void {
-  if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
-    console.log("[ConnectWS] WebSocket already open or connecting. Aborting new connection attempt.");
+  // First check if there's a connection attempt in progress
+  if (isConnectWebSocketAttemptInProgress) {
+    console.log("[ConnectWS] Connection attempt already in progress, skipping redundant call");
     return;
   }
-  if (isConnectWebSocketAttemptInProgress) {
-    console.log("[ConnectWS] Another connectWebSocket attempt is already in progress. Aborting.");
-    return;
+  
+  // Set flag to prevent parallel connection attempts
+  isConnectWebSocketAttemptInProgress = true;
+
+  // Check if socket is already established before trying to connect
+  if (socket) {
+    if (socket.readyState === WebSocket.OPEN) {
+      console.log("[ConnectWS] WebSocket is already OPEN. No need to reconnect.");
+      isConnectWebSocketAttemptInProgress = false;
+      return;
+    } else if (socket.readyState === WebSocket.CONNECTING) {
+      console.log("[ConnectWS] WebSocket is already CONNECTING. Waiting for that connection to complete.");
+      isConnectWebSocketAttemptInProgress = false;
+      return;
+    } else if (socket.readyState === WebSocket.CLOSING) {
+      // If socket is closing, wait for it to fully close before attempting to reconnect
+      console.log("[ConnectWS] WebSocket is currently CLOSING. Will wait until fully closed before reconnecting.");
+      // Setup a one-time event listener that will trigger connect once the socket is fully closed
+      socket.addEventListener('close', function reconnectAfterClose() {
+        // Remove this listener to ensure it only runs once
+        socket?.removeEventListener('close', reconnectAfterClose);
+        console.log("[ConnectWS] Previous WebSocket now fully closed. Attempting to connect.");
+        // Reset this flag since we're exiting the current function
+        isConnectWebSocketAttemptInProgress = false;
+        // Call connectWebSocket again now that socket is fully closed
+        setTimeout(connectWebSocket, 100);
+      }, { once: true });
+      return;
+    }
+    // If we get here, the socket is CLOSED, so we can proceed to reconnect
   }
   console.log("[ConnectWS] Attempting to connect WebSocket. Current socket state: " + (socket ? getWebSocketStateString(socket.readyState) : 'null') + ". Existing wsToken: " + (wsToken ? 'yes' : 'no'));
   isConnectWebSocketAttemptInProgress = true;
@@ -197,77 +270,91 @@ function connectWebSocket(): void {
 }
 
 function establishWebSocketConnection(wsUrl: string, isReusingToken: boolean): void {
-  try {
-    socket = new WebSocket(wsUrl);
-    intentionalDisconnect = false; 
-
-    socket.onopen = (): void => {
-      console.log(`WebSocket connected successfully ${isReusingToken ? '(reused token)' : '(new token)'}`);
-      reconnectAttempts = 0;
-      isConnectWebSocketAttemptInProgress = false; 
-      startWebSocketPing();
-    };
-
-    socket.onmessage = async (event: MessageEvent): Promise<void> => {
-      try {
-        const serverMessage = JSON.parse(event.data);
-
-        if (serverMessage.type === "OTP_RESULT" && serverMessage.payload) {
-            const { code, url } = serverMessage.payload;
-            if (url && !code) {
-                console.log(`[WebSocket] Auto-opening received URL: ${url.substring(0, 50)}...`);
-                openUrlInNewTab(url);
-                return; 
-            }
-            queueMessage({ action: "otpResultReceived", data: { code: code || null, url: url || null, messageId: serverMessage.payload.messageId || null }, timestamp: Date.now() });
-
-        } else if (serverMessage.type === "pong" || serverMessage.type === "PONG") {
-            // console.log("[WebSocket] Received pong:", serverMessage); // Keep commented or enable for debug
-        } else if (serverMessage.type === "CONNECTED") {
-             // console.log("[WebSocket] Connection confirmed by server:", serverMessage.message); // Keep commented
-        } else {
-            console.warn("[WebSocket] Received unknown message type:", serverMessage.type, serverMessage.payload); // Log payload too for context
-        }
-
-      } catch (error) { console.error("[WebSocket] Error handling message:", error); }
-    };
-
-    socket.onerror = (error: Event): void => {
-      console.error("WebSocket error:", error);
-      // isConnectWebSocketAttemptInProgress will be reset in onclose, which usually follows onerror
-    };
-
-    socket.onclose = (event: CloseEvent): void => {
-      const reason = event.reason || 'No reason provided'
-      console.warn(`WebSocket disconnected. Code: ${event.code}, Reason: ${reason.substring(0,100)}`);
-      socket = null; 
-      isConnectWebSocketAttemptInProgress = false; // Connection attempt is over
-      
-      if (intentionalDisconnect) {
-        console.log("WebSocket closed intentionally (e.g., due to logout). No reconnection attempt.");
-        intentionalDisconnect = false; 
-      } else {
-        // If we were reusing a token and the connection closed unexpectedly,
-        // the token might be invalid. Clear it to force a new fetch on next attempt.
-        // Specific close codes (e.g., 1008, 4000-4999) could make this more precise.
-        if (isReusingToken && (event.code === 1008 || (event.code >= 4000 && event.code <= 4999) || event.code === 1002 || event.code === 1003 || event.code === 1006 || event.code === 1011)) {
-            console.log(`[ConnectWS] WebSocket closed (code ${event.code}) after reusing token. Clearing token for next attempt.`);
-            userId = null;
-            wsToken = null;
-        }
-        handleReconnection(); 
-      }
-    };
-  } catch (error) { 
-    console.error("Error creating WebSocket:", error); 
-    isConnectWebSocketAttemptInProgress = false;
-    if (isReusingToken) {
-        console.log("[ConnectWS] Error creating WebSocket while reusing token. Clearing token.");
-        userId = null;
-        wsToken = null;
-    }
-    handleReconnection(); 
+  // If existing socket is in CLOSING state, we should wait for it to fully close
+  if (socket && socket.readyState === WebSocket.CLOSING) {
+    console.log("[EstablishWS] Cannot establish new connection while previous socket is still closing");
+    // Set up a listener to try again after close completes
+    socket.addEventListener('close', () => {
+      console.log("[EstablishWS] Previous socket now closed, can establish new connection");
+      establishWebSocketConnection(wsUrl, isReusingToken);
+    }, { once: true });
+    return;
   }
+
+  // If we already have an active socket, close it first
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+    console.log("[EstablishWS] Closing existing socket before establishing a new one");
+    intentionalDisconnect = true;
+    socket.close(1000, "Replacing with new connection");
+    // Set up a listener to create the new socket after the old one closes
+    socket.addEventListener('close', () => {
+      console.log("[EstablishWS] Previous socket closed, now creating new connection");
+      establishWebSocketConnection(wsUrl, isReusingToken);
+    }, { once: true });
+    return;
+  }
+  
+  // Create a new WebSocket instance
+  socket = new WebSocket(wsUrl);
+
+  // Connection opened
+  socket.onopen = (): void => {
+    console.log(`WebSocket connected successfully ${isReusingToken ? '(reused token)' : '(new token)'}`);
+    reconnectAttempts = 0;
+    isConnectWebSocketAttemptInProgress = false; 
+    startWebSocketPing();
+  };
+
+  socket.onmessage = async (event: MessageEvent): Promise<void> => {
+    try {
+      const serverMessage = JSON.parse(event.data);
+
+      if (serverMessage.type === "OTP_RESULT" && serverMessage.payload) {
+          const { code, url } = serverMessage.payload;
+          if (url && !code) {
+              console.log(`[WebSocket] Auto-opening received URL: ${url.substring(0, 50)}...`);
+              openUrlInNewTab(url);
+              return; 
+          }
+          queueMessage({ action: "otpResultReceived", data: { code: code || null, url: url || null, messageId: serverMessage.payload.messageId || null }, timestamp: Date.now() });
+
+      } else if (serverMessage.type === "pong" || serverMessage.type === "PONG") {
+          // console.log("[WebSocket] Received pong:", serverMessage); // Keep commented or enable for debug
+      } else if (serverMessage.type === "CONNECTED") {
+           // console.log("[WebSocket] Connection confirmed by server:", serverMessage.message); // Keep commented
+      } else {
+          console.warn("[WebSocket] Received unknown message type:", serverMessage.type, serverMessage.payload); // Log payload too for context
+      }
+
+    } catch (error) { console.error("[WebSocket] Error handling message:", error); }
+  };
+
+  socket.onerror = (error: Event): void => {
+    console.error("WebSocket error:", error);
+    // isConnectWebSocketAttemptInProgress will be reset in onclose, which usually follows onerror
+  };
+
+  socket.onclose = (event: CloseEvent): void => {
+    const reason = event.reason || 'No reason provided'
+    console.warn(`WebSocket disconnected. Code: ${event.code}, Reason: ${reason.substring(0,100)}`);
+    socket = null; 
+    isConnectWebSocketAttemptInProgress = false; // Connection attempt is over
+    
+    if (intentionalDisconnect) {
+      console.log("WebSocket closed intentionally (e.g., due to logout). No reconnection attempt.");
+      intentionalDisconnect = false; 
+    } else {
+      // If we were reusing a token and the connection closed unexpectedly,
+      // the token might be invalid. Clear it to force a new fetch on next attempt.
+      // Specific close codes (e.g., 1008, 4000-4999) could make this more precise.
+      if (isReusingToken && (event.code === 1008 || (event.code >= 4000 && event.code <= 4999) || event.code === 1002 || event.code === 1003 || event.code === 1006 || event.code === 1011)) {
+          console.log(`[ConnectWS] WebSocket closed (code ${event.code}) after reusing token. Clearing token for next attempt.`);
+          userId = null;
+          wsToken = null;
+      }
+      handleReconnection(); 
+    }
+  };
 }
 
 function handleReconnection(): void {

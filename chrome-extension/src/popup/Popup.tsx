@@ -1,9 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react"
 import { oauthManager } from "../lib/oauth"
 import { config } from "../lib/config"
-import { Button, buttonVariants } from "@/components/ui/button"
-import { cn } from "@/lib/utils"
-import { listLabels, getWatchedLabels, updateWatchedLabels, stopCurrentWatch } from "@/lib/setup"
+import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Switch } from "@/components/ui/switch"
 import { Label as UILabel } from "@/components/ui/label"
@@ -30,6 +28,78 @@ interface TokenResponse {
   id_token?: string
   expiryTimestamp: number
   email?: string 
+}
+
+// --- Gmail label related helper functions (moved from setup.ts) ---
+// These operate on the ID token that the Popup component already has, avoiding
+// additional token refreshes performed inside lib/setup.ts.
+async function listLabels(idToken?: string): Promise<Label[]> {
+  if (!idToken) {
+    throw new Error("User not authenticated")
+  }
+  const response = await fetch(`${config.BACKEND_URL}/api/list-labels`, {
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+    },
+  })
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ message: "Failed to list labels" }))
+    throw new Error(errorData.message || response.statusText)
+  }
+  const data = await response.json()
+  return (data.labels || []) as Label[]
+}
+
+async function getWatchedLabels(idToken?: string): Promise<string[]> {
+  if (!idToken) {
+    throw new Error("User not authenticated")
+  }
+  const response = await fetch(`${config.BACKEND_URL}/api/get-watched-labels`, {
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+    },
+  })
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ message: "Failed to get watched labels" }))
+    throw new Error(errorData.message || response.statusText)
+  }
+  const data = await response.json()
+  return (data.watchedLabelIds || []) as string[]
+}
+
+async function updateWatchedLabels(idToken: string, labelIds: string[]): Promise<void> {
+  if (!idToken) {
+    throw new Error("User not authenticated")
+  }
+  const response = await fetch(`${config.BACKEND_URL}/api/update-watched-labels`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ labelIds }),
+  })
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ message: "Failed to update watched labels" }))
+    throw new Error(errorData.message || response.statusText)
+  }
+}
+
+async function stopCurrentWatch(idToken?: string): Promise<void> {
+  if (!idToken) {
+    throw new Error("User not authenticated")
+  }
+  const response = await fetch(`${config.BACKEND_URL}/api/stop-watch`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json",
+    },
+  })
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ message: "Failed to stop watch" }))
+    throw new Error(errorData.message || response.statusText)
+  }
 }
 
 const Popup: React.FC = () => {
@@ -79,8 +149,8 @@ const Popup: React.FC = () => {
         // Fetch labels and preferences concurrently
         try {
           const [fetchedAvailable, fetchedWatchedIds, prefsData] = await Promise.all([
-            listLabels(),
-            getWatchedLabels(),
+            listLabels(currentToken.id_token),
+            getWatchedLabels(currentToken.id_token),
             // Fetch preferences directly here if logged in
             fetch(`${config.BACKEND_URL}/api/get-user-preferences`, {
               headers: { Authorization: `Bearer ${currentToken.id_token}` },
@@ -206,8 +276,8 @@ const Popup: React.FC = () => {
     setMessage(null)
     try {
       const labelsToWatch = selectedLabels
-      await updateWatchedLabels(labelsToWatch)
-      const updatedWatched = await getWatchedLabels()
+      await updateWatchedLabels(sessionToken!.id_token!, labelsToWatch)
+      const updatedWatched = await getWatchedLabels(sessionToken!.id_token!)
       setWatchedLabels(updatedWatched)
       setMessage("Watched labels updated!");
       setTimeout(() => setMessage(null), 3000);
@@ -225,7 +295,7 @@ const Popup: React.FC = () => {
     setError(null)
     setMessage(null)
     try {
-      await stopCurrentWatch()
+      await stopCurrentWatch(sessionToken!.id_token!)
       setWatchedLabels([])
       setMessage("Gmail watch stopped.");
       setTimeout(() => setMessage(null), 3000);

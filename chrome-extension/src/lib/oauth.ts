@@ -358,36 +358,6 @@ class OAuthManager {
   }
 
   /**
-   * Internal helper to attempt revoking Google's access token.
-   * Note: With the current OAuth flow, the client-side `access_token` is a placeholder
-   * ("managed_by_backend"), so this client-side revocation is largely symbolic.
-   * True token revocation should be handled by the backend.
-   */
-  private async revokeGoogleAccessTokenInternally(tokenResponse: TokenResponse | null): Promise<void> {
-    if (tokenResponse?.access_token && tokenResponse.access_token !== "managed_by_backend") {
-      try {
-        // console.log(`[OAuthManager] Attempting to revoke Google access token: ${tokenResponse.access_token.substring(0,10)}...`);
-        const response = await fetch("https://oauth2.googleapis.com/revoke", {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: `token=${encodeURIComponent(tokenResponse.access_token)}`,
-        })
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.warn(`[OAuthManager] Google token revocation request failed: ${response.status} ${errorText}`);
-        } else {
-          // console.log("[OAuthManager] Google access token revocation request successful (if token was valid).");
-        }
-      } catch (error: any) {
-        console.warn("[OAuthManager] Error sending Google token revocation request:", error.message)
-      }
-    } else {
-      // console.log("[OAuthManager] Skipping Google access token revocation on client-side (no real access token or placeholder found).");
-    }
-  }
-
-  /**
    * Checks if the stored token is expired.
    * A token is considered expired if its `expiryTimestamp` is in the past,
    * or within a small buffer window (5 minutes) to account for clock skew and processing time.
