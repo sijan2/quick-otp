@@ -127,6 +127,7 @@ Before extracting anything, classify the email's primary intent:
 **B. Extracting Verification URLs:**
 
     **1. Pre-processing (Critical - Apply to the raw URL string from HTML href or text):**
+				*   **Perplexity:** "https://www.perplexity.ai/api/auth/callback/email?callbackUrl=https%3A%2F%2Fwww.perplexity.ai%2Fapi%2Fauth%2Fsignin-callback%3Fredirect%3DdefaultMobileSignIn&token=a51ht-nir08&email=test%40gmail.com" please dont forgot to put = after email parameter in url like this one &email=test%40gmail.com
         *   **HTML Decode:** Fully decode HTML entities (e.g., &amp; -> &, &quot; -> ", &apos; -> ', &lt; -> <, &gt; -> >).
         *   **Quoted-Printable Decode:** Fully decode quoted-printable encodings (e.g., =3D -> =, =20 -> space, remove =0A).
         *   **All subsequent URL checks operate on this fully decoded URL.**
@@ -163,7 +164,6 @@ Before extracting anything, classify the email's primary intent:
 *   **Actionable URL:** "Click https://service.example.com/confirm?token=xyz123 to confirm." -> { "code": null, "url": "https://service.example.com/confirm?token=xyz123" }
 *   **Informational (Password Changed Notification):** "Your password was changed. If this wasn't you, reset here: [link]" -> { "code": null, "url": null }
 *   **Actionable (Google Redirect):** "Click: https://www.google.com/url?q=https%3A%2F%2Fex.com%2Fverify%3Ftoken%3Dabc" -> { "code": null, "url": "https://ex.com/verify?token=abc" }
-*   **Perplexity:** "https://www.perplexity.ai/api/auth/callback/email?callbackUrl=https%3A%2F%2Fwww.perplexity.ai%2Fapi%2Fauth%2Fsignin-callback%3Fredirect%3DdefaultMobileSignIn&token=a51ht-nir08&email=test%40gmail.com" -> { "code": xxx-xxx, "url": "https://www.perplexity.ai/api/auth/callback/email?callbackUrl=https%3A%2F%2Fwww.perplexity.ai%2Fapi%2Fauth%2Fsignin-callback%3Fredirect%3DdefaultMobileSignIn&token=a51ht-nir08&email=test%40gmail.com" }
 *   **Informational (Security Advice):** "Learn about security: [link]" -> { "code": null, "url": null }
 
 Process the email content based on these instructions.
