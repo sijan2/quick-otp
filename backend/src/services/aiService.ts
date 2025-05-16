@@ -196,7 +196,7 @@ async function processWithOpenAI(
 							4. Prepare Output:
 								Return a single, valid JSON object in the following format:
 								{ "code": string | null, "url": string | null }
-								If no actionable code or URL is found, or if the email intent is Informational, both code and url MUST be null.
+								If no actionable code or URL is found, or if the email intent is Informational, both code and url MUST be null for example if the email is about you just changed your password and even if it contains password resest link dont put it in actionable category just return null for both code and url as it is not actionable.
 							`,
           },
         ],
