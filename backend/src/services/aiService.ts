@@ -96,35 +96,6 @@ const DEFAULT_GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1bet
 const createSystemPrompt = (): string => {
   return `
 You are an AI assistant specialized in parsing email content to extract actionable user verification items (OTPs or verification/password reset links). Your task is to analyze the following email content and determine if it contains such items for immediate use by the user.
-
-Please follow these steps to process the email:
-
-1. Determine Email Intent:
-   Analyze the email to classify its primary intent as either ACTIONABLE VERIFICATION or INFORMATIONAL / NOT ACTIONABLE.
-
-2. Extract Verification Code (if applicable):
-   - Look for explicitly labeled codes such as "verification code", "OTP", "one-time password", "confirmation code", "security code", "auth code", "your single-use code is", "enter this code".
-   - Codes are typically 4-10 characters (digits or alphanumeric).
-   - Remove spaces within codes (e.g., "123 456" becomes "123456").
-   - Preserve hyphens if they are part of the code's structure (e.g., "ABC-123").
-
-3. Extract Verification URL (if applicable):
-   - Prioritize URLs from HTML <a> tags if available.
-   - Look for link text or surrounding text like "confirm email", "verify account", "reset password", "activate account", "Sign In", "Verify".
-   - Process the URL:
-     a. HTML Decode: Fully decode HTML entities.
-     b. Quoted-Printable Decode: Fully decode quoted-printable encodings.
-   - Validate the decoded URL:
-     a. Handle Google Redirects: If the host is google.com with a q= or url= parameter, extract and URL-decode its value.
-     b. Check for proper parameter structure (name=value).
-     c. For Perplexity-specific structure, ensure parameters like callbackUrl=..., token=..., email=... are present with the "=" sign and a value.
-     d. IMPORTANT: Always include the "=" sign after the email parameter in the URL.
-   - Select the most relevant URL if multiple valid ones are found.
-
-4. Prepare Output:
-   Return a single, valid JSON object in the following format:
-   { "code": string | null, "url": string | null }
-   If no actionable code or URL is found, or if the email intent is Informational, both code and url MUST be null.
   `.trim();
 };
 
@@ -189,7 +160,44 @@ async function processWithOpenAI(
           },
           {
             role: "user",
-            content: emailBody,
+            content: `
+						You are an AI assistant specialized in parsing email content to extract actionable user verification items (OTPs or verification/password reset links). Your task is to analyze the following email content and determine if it contains such items for immediate use by the user.
+
+							Here is the email content to analyze:
+
+							<email_content>
+							${emailBody}
+							</email_content>
+
+							Please follow these steps to process the email:
+
+							1. Determine Email Intent:
+								Analyze the email to classify its primary intent as either ACTIONABLE VERIFICATION or INFORMATIONAL / NOT ACTIONABLE.
+
+							2. Extract Verification Code (if applicable):
+								- Look for explicitly labeled codes such as "verification code", "OTP", "one-time password", "confirmation code", "security code", "auth code", "your single-use code is", "enter this code".
+								- Codes are typically 4-10 characters (digits or alphanumeric).
+								- Remove spaces within codes (e.g., "123 456" becomes "123456").
+								- Preserve hyphens if they are part of the code's structure (e.g., "ABC-123").
+
+							3. Extract Verification URL (if applicable):
+								- Prioritize URLs from HTML <a> tags if available.
+								- Look for link text or surrounding text like "confirm email", "verify account", "reset password", "activate account", "Sign In", "Verify".
+								- Process the URL:
+									a. HTML Decode: Fully decode HTML entities.
+									b. Quoted-Printable Decode: Fully decode quoted-printable encodings.
+								- Validate the decoded URL:
+									a. Handle Google Redirects: If the host is google.com with a q= or url= parameter, extract and URL-decode its value.
+									b. Check for proper parameter structure (name=value).
+									c. For Perplexity-specific structure, ensure parameters like callbackUrl=..., token=..., email=... are present with the "=" sign and a value.
+									d. IMPORTANT: Always include the "=" sign after the email parameter in the URL.
+								- Select the most relevant URL if multiple valid ones are found.
+
+							4. Prepare Output:
+								Return a single, valid JSON object in the following format:
+								{ "code": string | null, "url": string | null }
+								If no actionable code or URL is found, or if the email intent is Informational, both code and url MUST be null.
+							`,
           },
         ],
         response_format: { type: "json_object" },
