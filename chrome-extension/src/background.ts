@@ -80,6 +80,7 @@ setInterval(async () => {
     if (!isAuthenticated) {
       console.log("Periodic check: User not authenticated or id_token expired/nearing expiry. Attempting to refresh id_token...");
       try {
+        console.log("[PeriodicCheck] Attempting to refresh id_token via oauthManager.getIdToken().");
         const newIdToken = await oauthManager.getIdToken(); 
         if (newIdToken) {
           console.log("Periodic check: id_token refreshed successfully. Clearing old wsToken to fetch a new one.");
@@ -107,6 +108,7 @@ setInterval(async () => {
           console.log("Periodic check: Ensuring WebSocket is connected with new token.");
           connectWebSocket(); 
         } else {
+          console.warn("[PeriodicCheck] oauthManager.getIdToken() did not yield a new token. Auth may be lost or refresh failed silently within manager.");
           console.warn("Periodic check: id_token refresh attempt did not yield a new token. Auth may be lost.");
           if (socket && socket.readyState === WebSocket.OPEN) {
              console.warn("Periodic check: Closing WebSocket as authentication refresh failed.");
@@ -117,6 +119,7 @@ setInterval(async () => {
         }
       } catch (refreshError: any) {
         console.error("Periodic check: Error during id_token refresh:", refreshError.message);
+        console.error("[PeriodicCheck] Error during oauthManager.getIdToken() call:", refreshError);
         if (socket && socket.readyState === WebSocket.OPEN) {
             console.warn("Periodic check: Closing WebSocket due to error in authentication refresh.");
             intentionalDisconnect = true;
@@ -172,6 +175,7 @@ function connectWebSocket(): void {
   
   // Set flag to prevent parallel connection attempts
   isConnectWebSocketAttemptInProgress = true;
+  console.log("[ConnectWS] Attempting connection. wsToken exists: ", !!wsToken, " userId exists: ", !!userId, "isConnectWebSocketAttemptInProgress:", isConnectWebSocketAttemptInProgress);
 
   // Check if socket is already established before trying to connect
   if (socket) {
@@ -205,7 +209,7 @@ function connectWebSocket(): void {
 
   oauthManager.getTokenResponse().then(googleTokenResponse => {
     if (!googleTokenResponse?.id_token) {
-      console.warn("[ConnectWS] Cannot connect: Google ID token not available. Auth might have failed or token not stored.");
+      console.warn("[ConnectWS] Pre-flight check: Google ID token NOT available from oauthManager. Aborting connection attempt.");
       isConnectWebSocketAttemptInProgress = false;
       return; 
     }
@@ -217,6 +221,7 @@ function connectWebSocket(): void {
       establishWebSocketConnection(wsUrl, true); // true indicates token reuse
     } else {
       console.log("[ConnectWS] No existing wsToken or userId, or they were cleared. Fetching new WebSocket token from backend.");
+      console.log("[ConnectWS] Fetching wsToken using Google ID token (first 10 chars):", googleIdToken ? googleIdToken.substring(0,10) : "null");
       fetch(`${config.BACKEND_URL}/auth/ws-token`, {
         method: 'POST',
         headers: {
@@ -255,11 +260,17 @@ function connectWebSocket(): void {
         establishWebSocketConnection(wsUrl, false); // false indicates not reusing (new) token
       })
       .catch(error => {
-        console.error("[ConnectWS] Error during WebSocket token fetch or processing:", error.message, error);
+        console.error("[ConnectWS] Error during WebSocket token fetch or processing:", error.message);
+        console.error("[ConnectWS] Error details during WebSocket token fetch:", error);
         userId = null; 
         wsToken = null;
         isConnectWebSocketAttemptInProgress = false;
-        handleReconnection();
+        if (error.message && error.message.includes("Failed to get WebSocket token: 401")) {
+          console.warn("[ConnectWS] Received 401 fetching wsToken. ID token is likely invalid. Forcing full refresh.");
+          oauthManager.forceRefreshAndConnect();
+        } else {
+          handleReconnection();
+        }
       });
     }
   }).catch(error => {
@@ -335,6 +346,7 @@ function establishWebSocketConnection(wsUrl: string, isReusingToken: boolean): v
   };
 
   socket.onclose = (event: CloseEvent): void => {
+    console.log(`[EstablishWS] WebSocket onclose event. Code: ${event.code}, Reason: '${event.reason}', Was intentional: ${intentionalDisconnect}, Was reusing token: ${isReusingToken}`);
     const reason = event.reason || 'No reason provided'
     console.warn(`WebSocket disconnected. Code: ${event.code}, Reason: ${reason.substring(0,100)}`);
     socket = null; 
@@ -742,7 +754,8 @@ async function initializeConnectionOnStartup() {
   console.log("[Startup] Checking initial authentication state...");
   
   oauthManager.onAuthSuccess((idToken) => {
-    console.log("[Startup] Auth success callback triggered with valid token. Clearing old wsToken and initiating WebSocket connection...");
+    console.log("[AuthSuccessCallback] Triggered. ID Token (first 10 chars):", idToken ? idToken.substring(0,10) : "null", ". Clearing old wsToken and initiating WebSocket connection.");
+    // console.log("[Startup] Auth success callback triggered with valid token. Clearing old wsToken and initiating WebSocket connection..."); // Original log, commented out as new one is more specific
     userId = null; // Force new wsToken fetch
     wsToken = null; // Force new wsToken fetch
     connectWebSocket();
@@ -756,14 +769,17 @@ async function initializeConnectionOnStartup() {
     } else {
       console.log("[Startup] User is not authenticated. Attempting to refresh session immediately (silently)...");
       try {
+        console.log("[Startup] Attempting silent id_token refresh via oauthManager.getIdToken(false).");
         const newIdToken = await oauthManager.getIdToken(false);
         if (!newIdToken) {
           // This will be hit if getIdToken(false) returns null
+          console.log("[Startup] Silent id_token refresh via oauthManager.getIdToken(false) returned null. Manual login likely required.");
           console.log("[Startup] Silent authentication/refresh not possible (returned null). User needs to log in manually. Extension will wait.");
         }
         // If newIdToken exists, the auth success callback will handle connecting the WebSocket
       } catch (error: any) {
         // This catch block will now only handle unexpected errors from getIdToken
+        console.error("[Startup] Error during initial silent oauthManager.getIdToken(false) call:", error);
         console.error("[Startup] Unexpected error during initial silent authentication/refresh attempt:", error.message, error.stack);
       }
     }
